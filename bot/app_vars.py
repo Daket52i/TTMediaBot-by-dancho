@@ -10,9 +10,9 @@ app_version = "4.0"
 client_name = app_name + "-V" + app_version
 about_text: Callable[[Translator], str] = lambda translator: translator.translate(
     """\
-Hello! I am João Almeida. This is my fork of TTMediaBot for TeamTalk 5.
-This repository focuses on stability and support for YouTube Music.
-Repository: https://github.com/JoaoDEVWHADS/TTMediaBot
+Hello! This is TTMediaBot — Russian Edition, a fork for TeamTalk 5.
+Music: Muzofond and Hitmo (mp3). Video: Rutube. YouTube is not supported: it does not work from Russia.
+Repository: https://github.com/Daket52i/TTMediaBot-by-dancho
 Original Authors: Amir Gumerov, Vladislav Kopylov, Beqa Gozalishvili, Kirill Belousov.
 """
 )
