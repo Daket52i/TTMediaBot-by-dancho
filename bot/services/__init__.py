@@ -45,6 +45,8 @@ class Service(ABC):
 from bot.services.rt import RtService
 from bot.services.mf import MfService
 from bot.services.hitmo import HitmoService
+from bot.services.vk import VkService
+from bot.services.yam import YamService
 
 
 class ServiceManager:
@@ -54,6 +56,8 @@ class ServiceManager:
             "rt": RtService(bot, self.config.rt),
             "mf": MfService(bot, self.config.mf),
             "hitmo": HitmoService(bot, self.config.hitmo),
+            "vk": VkService(bot, self.config.vk),
+            "yam": YamService(bot, self.config.yam),
         }
         # В старых config.json мог остаться default_service "yt"/"ytm" — этих
         # сервисов больше нет, и обращение к словарю роняло бота на старте.

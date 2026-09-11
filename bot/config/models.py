@@ -73,11 +73,23 @@ class HitmoModel(BaseModel):
     search_results: int = 10
 
 
+class VkModel(BaseModel):
+    enabled: bool = True
+    token: str = ""
+
+
+class YamModel(BaseModel):
+    enabled: bool = True
+    token: str = ""
+
+
 class ServicesModel(BaseModel):
     default_service: str = "mf"
     rt: RtModel = RtModel()
     mf: MfModel = MfModel()
     hitmo: HitmoModel = HitmoModel()
+    vk: VkModel = VkModel()
+    yam: YamModel = YamModel()
 
 
 class LoggerModel(BaseModel):
