@@ -50,15 +50,6 @@
     },
     "services": {
         "default_service": "mf",
-        "yt": {
-            "enabled": false,
-            "cookiefile_path": "",
-            "search_results": 1
-        },
-        "ytm": {
-            "enabled": false,
-            "search_results": 1
-        },
         "rt": {
             "enabled": true,
             "search_results": 10

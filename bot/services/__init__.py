@@ -42,8 +42,6 @@ class Service(ABC):
         ...
 
 
-from bot.services.yt import YtService
-from bot.services.ytm import YtmService
 from bot.services.rt import RtService
 from bot.services.mf import MfService
 from bot.services.hitmo import HitmoService
@@ -53,13 +51,20 @@ class ServiceManager:
     def __init__(self, bot: Bot) -> None:
         self.config = bot.config.services
         self.services: Dict[str, Service] = {
-            "yt": YtService(bot, self.config.yt),
-            "ytm": YtmService(bot, self.config.ytm),
             "rt": RtService(bot, self.config.rt),
             "mf": MfService(bot, self.config.mf),
             "hitmo": HitmoService(bot, self.config.hitmo),
         }
-        self.service: Service = self.services[self.config.default_service]
+        # В старых config.json мог остаться default_service "yt"/"ytm" — этих
+        # сервисов больше нет, и обращение к словарю роняло бота на старте.
+        default_service = self.config.default_service
+        if default_service not in self.services:
+            logging.warning(
+                f"Сервис '{default_service}' больше не поддерживается — "
+                f"включаю Музфонд (mf)"
+            )
+            default_service = "mf"
+        self.service: Service = self.services[default_service]
         self.fallback_service = app_vars.fallback_service
         import builtins
 
