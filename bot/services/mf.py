@@ -57,50 +57,49 @@ class MfService(_Service):
         soup = BeautifulSoup(html, "html.parser")
         tracks: List[Dict[str, Any]] = []
 
-        items = soup.select(".musicItem, .playlist-item, .track-item, [class*=item]")
+        items_by_id = {}
+        for item in soup.select("li[data-id]"):
+            did = item.get("data-id", "")
+            if did not in items_by_id:
+                items_by_id[did] = []
+            items_by_id[did].append(item)
 
-        if not items:
-            items = soup.select("div[data-id], li[data-id], .search-item")
+        for did, elems in items_by_id.items():
+            if len(tracks) >= limit:
+                break
+            url = ""
+            title_text = ""
+            for el in elems:
+                u = el.get("data-url", "")
+                if u and "dl3s" in u:
+                    url = u
+                t = el.get_text(strip=True)
+                if t:
+                    title_text = t
+            if not url:
+                continue
 
-        if not items:
-            audio_tags = soup.select("audio")
-            for audio in audio_tags[:limit]:
-                src = audio.get("src", "") or audio.get("data-src", "")
-                if not src:
-                    source = audio.select_one("source")
-                    if source:
-                        src = source.get("src", "")
-                if src:
-                    parent = audio.parent
-                    title = ""
-                    if parent:
-                        title_el = parent.select_one(".title, .name, .track-name, h3, h4, a")
-                        if title_el:
-                            title = title_el.get_text(strip=True)
-                    tracks.append({
-                        "title": title or "Unknown",
-                        "url": src,
-                        "artist": "",
-                    })
+            parts = re.split(r"\u2014|\u2013|-", title_text, maxsplit=1)
+            artist = parts[0].strip() if len(parts) > 1 else ""
+            title = parts[1].strip() if len(parts) > 1 else title_text.strip()
+
+            time_match = re.search(r"(\d{1,2}:\d{2})$", title)
+            if time_match:
+                title = title[:time_match.start()].strip()
+
+            full_title = f"{artist} - {title}" if artist and artist not in title else title
+
+            tracks.append({
+                "title": full_title or "Unknown",
+                "url": url,
+                "artist": artist,
+            })
 
         if not tracks:
-            all_links = soup.select("a[href*='/pesnya/'], a[href*='/track/']")
-            for link in all_links[:limit]:
-                href = link.get("href", "")
-                title = link.get_text(strip=True)
-                if title and href:
-                    tracks.append({
-                        "title": title,
-                        "url": f"https://muzofond.fm{href}" if href.startswith("/") else href,
-                        "artist": "",
-                        "is_page": True,
-                    })
-
-        if not tracks:
-            for tag in soup.select("[data-url], [data-audio], [data-mp3]"):
-                url = tag.get("data-url") or tag.get("data-audio") or tag.get("data-mp3")
-                title = tag.get_text(strip=True)
-                if url:
+            for tag in soup.select("[data-url]"):
+                url = tag.get("data-url", "")
+                if url and "dl3s" in url:
+                    title = tag.get_text(strip=True)
                     tracks.append({
                         "title": title or "Unknown",
                         "url": url,
@@ -204,14 +203,19 @@ class MfService(_Service):
         info = dict(extra_info or {})
         page_url = info.get("page_url") or url
 
+        stream_url = info.get("stream_url", "")
+        if stream_url and "dl3s" in stream_url:
+            audio_url = stream_url
+        elif url and "dl3s" in url:
+            audio_url = url
+        else:
+            audio_url = ""
+
         if process:
-            audio_url = self._extract_audio_url(page_url)
             if not audio_url:
-                stream = info.get("stream_url", "")
-                if stream:
-                    audio_url = stream
-                else:
-                    raise errors.ServiceError("Muzofond: Could not extract audio URL")
+                audio_url = self._extract_audio_url(page_url)
+            if not audio_url:
+                raise errors.ServiceError("Muzofond: Could not extract audio URL")
 
             title = info.get("title", "")
             artist = info.get("artist", "")
@@ -232,11 +236,10 @@ class MfService(_Service):
                 )
             ]
 
-        stream_url = info.get("stream_url", "")
-        if stream_url:
+        if audio_url:
             return [Track(
                 service=self.name,
-                url=stream_url,
+                url=audio_url,
                 name=info.get("title", ""),
                 format="mp3",
                 type=TrackType.Default,
@@ -255,6 +258,96 @@ class MfService(_Service):
         elapsed = (time.perf_counter() - start_time) * 1000
         logging.info(f"Muzofond Get (Dynamic) finished in {elapsed:.2f}ms for {page_url}")
         return [track]
+
+
+    def _fetch_autoplay_async(self, track_id: str) -> None:
+        threading.Thread(
+            target=self._fetch_autoplay_sync,
+            args=(track_id,),
+            daemon=True,
+            name=f"MF_Autoplay_{track_id}",
+        ).start()
+
+    def _fetch_autoplay_sync(self, track_id: str) -> bool:
+        try:
+            info = {}
+            for t in reversed(self.bot.player.track_list):
+                ei = getattr(t, "extra_info", None) or {}
+                if ei.get("stream_url", "") == track_id or ei.get("page_url", "") == track_id:
+                    info = ei
+                    break
+
+            artist = info.get("artist", "")
+            title = info.get("title", "")
+            if not artist and not title:
+                return False
+
+            query = f"{artist} {title}" if artist else title
+            client = self._get_client()
+            resp = client.get(f"https://muzofond.fm/search/{query}")
+            resp.raise_for_status()
+
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            items_by_id = {}
+            for item in soup.select("li[data-id]"):
+                did = item.get("data-id", "")
+                if did not in items_by_id:
+                    items_by_id[did] = []
+                items_by_id[did].append(item)
+
+            existing_urls = set()
+            for t in self.bot.player.track_list:
+                ei = getattr(t, "extra_info", None) or {}
+                u = ei.get("stream_url", "")
+                if u:
+                    existing_urls.add(u)
+
+            new_tracks = []
+            for did, elems in items_by_id.items():
+                url = ""
+                title_text = ""
+                for el in elems:
+                    u = el.get("data-url", "")
+                    if u and "dl3s" in u:
+                        url = u
+                    t = el.get_text(strip=True)
+                    if t:
+                        title_text = t
+                if not url or url in existing_urls:
+                    continue
+
+                parts = re.split(r"\u2014|\u2013|-", title_text, maxsplit=1)
+                t_artist = parts[0].strip() if len(parts) > 1 else ""
+                t_title = parts[1].strip() if len(parts) > 1 else title_text.strip()
+
+                time_match = re.search(r"(\d{1,2}:\d{2})$", t_title)
+                if time_match:
+                    t_title = t_title[:time_match.start()].strip()
+
+                full_title = f"{t_artist} - {t_title}" if t_artist and t_artist not in t_title else t_title
+
+                new_tracks.append(Track(
+                    service=self.name,
+                    url=url,
+                    name=full_title,
+                    format="mp3",
+                    type=TrackType.Default,
+                    extra_info={"stream_url": url, "title": t_title, "artist": t_artist},
+                    extracted_at=time.perf_counter(),
+                ))
+                new_tracks[-1]._is_fetched = True
+                existing_urls.add(url)
+
+            if new_tracks:
+                self.bot.player.track_list.extend(new_tracks)
+                logging.info(f"[MF] Added {len(new_tracks)} autoplay tracks (total: {len(self.bot.player.track_list)})")
+                return True
+
+        except Exception as e:
+            logging.debug(f"[MF] Autoplay error: {e}")
+        return False
 
     def download(self, track: Track, file_path: str, video: bool = False) -> None:
         info = track.extra_info or {}

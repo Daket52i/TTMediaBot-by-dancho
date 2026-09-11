@@ -73,12 +73,12 @@ class YtmModel(BaseModel):
 
 class RtModel(BaseModel):
     enabled: bool = True
-    search_results: int = 1
+    search_results: int = 10
 
 
 class MfModel(BaseModel):
     enabled: bool = True
-    search_results: int = 1
+    search_results: int = 10
 
 
 class ServicesModel(BaseModel):

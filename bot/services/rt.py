@@ -201,6 +201,80 @@ class RtService(_Service):
 
         return m3u8 if m3u8 else None
 
+    def _fetch_autoplay_async(self, video_id: str) -> None:
+        threading.Thread(
+            target=self._fetch_autoplay_sync,
+            args=(video_id,),
+            daemon=True,
+            name=f"RT_Autoplay_{video_id}",
+        ).start()
+
+    def _fetch_autoplay_sync(self, video_id: str) -> bool:
+        try:
+            info = {}
+            for t in reversed(self.bot.player.track_list):
+                ei = getattr(t, "extra_info", None) or {}
+                if ei.get("videoId") == video_id:
+                    info = ei
+                    break
+
+            title = info.get("title", "")
+            author = info.get("author", "")
+            if not title:
+                return False
+
+            query = f"{author} {title}" if author else title
+            client = self._get_client()
+            resp = client.get(
+                "https://rutube.ru/api/search/video/",
+                params={"query": query, "page": 1, "limit": 20},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+
+            existing_ids = set()
+            for t in self.bot.player.track_list:
+                ei = getattr(t, "extra_info", None) or {}
+                vid = ei.get("videoId")
+                if vid:
+                    existing_ids.add(vid)
+
+            new_tracks = []
+            for item in results:
+                vid = item.get("id", "")
+                if not vid or vid in existing_ids or vid == video_id:
+                    continue
+                t_title = item.get("title", "")
+                author_data = item.get("author", {})
+                author_name = author_data.get("name", "") if isinstance(author_data, dict) else ""
+                full_title = f"{t_title} - {author_name}" if author_name else t_title
+
+                track_url = f"https://rutube.ru/video/{vid}/"
+                new_tracks.append(Track(
+                    service=self.name,
+                    url=track_url,
+                    name=full_title,
+                    type=TrackType.Dynamic,
+                    extra_info={
+                        "videoId": vid,
+                        "title": t_title,
+                        "author": author_name,
+                        "duration": item.get("duration", 0),
+                        "thumbnail": item.get("thumbnail_url", ""),
+                    },
+                ))
+                existing_ids.add(vid)
+
+            if new_tracks:
+                self.bot.player.track_list.extend(new_tracks)
+                logging.info(f"[RT] Added {len(new_tracks)} autoplay tracks (total: {len(self.bot.player.track_list)})")
+                return True
+
+        except Exception as e:
+            logging.debug(f"[RT] Autoplay error: {e}")
+        return False
+
     def download(self, track: Track, file_path: str, video: bool = False) -> None:
         info = track.extra_info or {}
         video_id = info.get("videoId") or self._extract_video_id(track.url)

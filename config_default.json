@@ -61,11 +61,11 @@
         },
         "rt": {
             "enabled": true,
-            "search_results": 1
+            "search_results": 10
         },
         "mf": {
             "enabled": true,
-            "search_results": 1
+            "search_results": 10
         }
     },
     "logger": {
