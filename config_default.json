@@ -49,14 +49,14 @@
         }
     },
     "services": {
-        "default_service": "yt",
+        "default_service": "mf",
         "yt": {
-            "enabled": true,
+            "enabled": false,
             "cookiefile_path": "",
             "search_results": 1
         },
         "ytm": {
-            "enabled": true,
+            "enabled": false,
             "search_results": 1
         },
         "rt": {
@@ -64,6 +64,10 @@
             "search_results": 10
         },
         "mf": {
+            "enabled": true,
+            "search_results": 10
+        },
+        "hitmo": {
             "enabled": true,
             "search_results": 10
         }

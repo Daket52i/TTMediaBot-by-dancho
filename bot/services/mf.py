@@ -1,8 +1,11 @@
 from __future__ import annotations
+import html as _html
 import logging
+import threading
 import time
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -17,12 +20,119 @@ import httpx
 from bs4 import BeautifulSoup
 
 
+# muzofond.fm больше не отвечает (403), рабочий сайт — muzofond.su. Пробуем
+# зеркала по порядку и запоминаем то, которое ответило.
+_BASES = ("https://muzofond.su", "https://muzofond.fm")
+
+# Разметка выдачи: <div class="item-track ..." data-file="//muzofond.su/stream/<base64>"
+# data-track-title="..." data-artist="...">. Прямая ссылка на mp3 приходит в
+# data-file без схемы (//host/...). Расширения .mp3 в ней нет — файл отдаётся
+# через /stream/, поэтому проверять ссылку по "dl3s", как раньше, бесполезно:
+# на живом сайте таких ссылок нет вообще.
+_FILE_ATTR = "data-file"
+_ARTIST_ATTR = "data-artist"
+_TITLE_ATTR = "data-track-title"
+
+# Старая разметка (до переезда): ссылка лежала в data-url и опознавалась по
+# подстроке dl3s, название — текстом внутри элемента.
+_LEGACY_URL_ATTR = "data-url"
+_TIME_RE = re.compile(r"\s*\d{1,2}:\d{2}\s*$")
+# Разделитель «исполнитель - название» только с пробелами вокруг тире: иначе
+# «Jay-Z» разрезается пополам и превращается в двух исполнителей.
+_DASH_SPLIT_RE = re.compile(r"\s+[—–-]\s+")
+
+_AUDIO_PATTERNS = (
+    r'(?:src|url|file)\s*[:=]\s*["\']?(https?://[^"\'>\s]+\.mp3[^"\'>\s]*)',
+    r'(?:src|url|file)\s*[:=]\s*["\']?(https?://[^"\'>\s]+\.m4a[^"\'>\s]*)',
+    r'audio[^>]*src\s*=\s*["\']?(https?://[^"\'>\s]+)',
+)
+
+
+def _clean(text: Optional[str]) -> str:
+    return _html.unescape(text or "").strip()
+
+
+def _absolute(url: Optional[str]) -> str:
+    """Ссылка из разметки → абсолютная (там она приходит как //host/...)."""
+    url = _clean(url)
+    if url.startswith("//"):
+        return "https:" + url
+    return url
+
+
+def _looks_like_audio(url: str) -> bool:
+    """Ссылка ведёт на сам файл, а не на страницу трека.
+
+    У muzofond.su прямой файл — это /stream/<base64> без расширения, поэтому
+    проверки на .mp3 мало; dl3s оставлен для старой разметки.
+    """
+    if not url:
+        return False
+    low = url.lower()
+    return (
+        "dl3s" in low
+        or "/stream/" in low
+        or low.endswith((".mp3", ".m4a", ".aac", ".ogg"))
+    )
+
+
+def _split_artist_title(text: str) -> tuple[str, str]:
+    """«Исполнитель - Название» → (исполнитель, название)."""
+    text = _clean(_TIME_RE.sub("", text))
+    parts = _DASH_SPLIT_RE.split(text, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return "", text
+
+
+def parse_items(body: str, limit: int) -> List[Dict[str, Any]]:
+    """Разобрать страницу выдачи в список {url, title, artist}."""
+    soup = BeautifulSoup(body, "html.parser")
+    tracks: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    # Новая разметка: всё нужное лежит в атрибутах элемента трека.
+    for tag in soup.select(f"[{_FILE_ATTR}]"):
+        if len(tracks) >= limit:
+            break
+        url = _absolute(tag.get(_FILE_ATTR))
+        if not _looks_like_audio(url) or url in seen:
+            continue
+        seen.add(url)
+        artist = _clean(tag.get(_ARTIST_ATTR))
+        title = _clean(tag.get(_TITLE_ATTR))
+        if not title and not artist:
+            artist, title = _split_artist_title(tag.get_text(" ", strip=True))
+        tracks.append({"url": url, "title": title or "Unknown", "artist": artist})
+    if tracks:
+        return tracks
+
+    # Старая разметка (на случай, если зеркало отдаст прежний дизайн).
+    for tag in soup.select(f"[{_LEGACY_URL_ATTR}]"):
+        if len(tracks) >= limit:
+            break
+        url = _absolute(tag.get(_LEGACY_URL_ATTR))
+        if not _looks_like_audio(url) or url in seen:
+            continue
+        seen.add(url)
+        artist, title = _split_artist_title(tag.get_text(" ", strip=True))
+        tracks.append({"url": url, "title": title or "Unknown", "artist": artist})
+
+    return tracks
+
+
+def _join_name(artist: str, title: str) -> str:
+    if artist and artist not in title:
+        return f"{artist} - {title}"
+    return title
+
+
 class MfService(_Service):
     def __init__(self, bot: Bot, config: MfModel):
         self.bot = bot
         self.config = config
         self.name = "mf"
-        self.hostnames = ["muzofond.fm", "www.muzofond.fm"]
+        self.hostnames = ["muzofond.su", "www.muzofond.su", "muzofond.fm", "www.muzofond.fm"]
         self.is_enabled = self.config.enabled
         self.error_message = ""
         self.warning_message = ""
@@ -32,9 +142,10 @@ class MfService(_Service):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://muzofond.fm/",
+            "Referer": _BASES[0] + "/",
         }
         self._client: Optional[httpx.Client] = None
+        self._base = _BASES[0]
 
     def initialize(self):
         self._client = httpx.Client(
@@ -53,62 +164,33 @@ class MfService(_Service):
             )
         return self._client
 
+    def _request(self, path: str) -> httpx.Response:
+        """GET по пути с перебором зеркал. Возвращает первый успешный ответ.
+
+        Живое зеркало запоминается в self._base и пробуется первым — иначе
+        каждый запрос снова упирался бы в мёртвый muzofond.fm.
+        """
+        last_error: Optional[Exception] = None
+        for base in (self._base,) + tuple(b for b in _BASES if b != self._base):
+            try:
+                resp = self._get_client().get(
+                    base + path, headers={"Referer": base + "/"}
+                )
+                if resp.status_code == 200:
+                    self._base = base
+                    return resp
+                last_error = errors.ServiceError(
+                    f"Muzofond: HTTP {resp.status_code} ({base})"
+                )
+            except Exception as e:
+                last_error = e
+        raise last_error or errors.ServiceError("Muzofond: сервис недоступен")
+
     def _parse_search_page(self, html: str, limit: int) -> List[Dict[str, Any]]:
-        soup = BeautifulSoup(html, "html.parser")
-        tracks: List[Dict[str, Any]] = []
-
-        items_by_id = {}
-        for item in soup.select("li[data-id]"):
-            did = item.get("data-id", "")
-            if did not in items_by_id:
-                items_by_id[did] = []
-            items_by_id[did].append(item)
-
-        for did, elems in items_by_id.items():
-            if len(tracks) >= limit:
-                break
-            url = ""
-            title_text = ""
-            for el in elems:
-                u = el.get("data-url", "")
-                if u and "dl3s" in u:
-                    url = u
-                t = el.get_text(strip=True)
-                if t:
-                    title_text = t
-            if not url:
-                continue
-
-            parts = re.split(r"\u2014|\u2013|-", title_text, maxsplit=1)
-            artist = parts[0].strip() if len(parts) > 1 else ""
-            title = parts[1].strip() if len(parts) > 1 else title_text.strip()
-
-            time_match = re.search(r"(\d{1,2}:\d{2})$", title)
-            if time_match:
-                title = title[:time_match.start()].strip()
-
-            full_title = f"{artist} - {title}" if artist and artist not in title else title
-
-            tracks.append({
-                "title": full_title or "Unknown",
-                "url": url,
-                "artist": artist,
-            })
-
-        if not tracks:
-            for tag in soup.select("[data-url]"):
-                url = tag.get("data-url", "")
-                if url and "dl3s" in url:
-                    title = tag.get_text(strip=True)
-                    tracks.append({
-                        "title": title or "Unknown",
-                        "url": url,
-                        "artist": "",
-                    })
-
-        return tracks[:limit]
+        return parse_items(html, limit)
 
     def _extract_audio_url(self, page_url: str) -> Optional[str]:
+        page_url = _absolute(page_url)
         client = self._get_client()
         try:
             resp = client.get(page_url)
@@ -118,13 +200,11 @@ class MfService(_Service):
             logging.error(f"Muzofond page fetch failed: {e}")
             return None
 
-        patterns = [
-            r'(?:src|url|file)\s*[:=]\s*["\']?(https?://[^"\'>\s]+\.mp3[^"\'>\s]*)',
-            r'(?:src|url|file)\s*[:=]\s*["\']?(https?://[^"\'>\s]+\.m4a[^"\'>\s]*)',
-            r'(?:src|url|file)\s*[:=]\s*["\']?(https?://[^"\'>\s]+audio[^"\'>\s]*)',
-            r'audio[^>]*src\s*=\s*["\']?(https?://[^"\'>\s]+)',
-        ]
-        for pattern in patterns:
+        items = parse_items(html, 1)
+        if items:
+            return items[0]["url"]
+
+        for pattern in _AUDIO_PATTERNS:
             match = re.search(pattern, html, re.IGNORECASE)
             if match:
                 return match.group(1).rstrip("'\"")
@@ -138,7 +218,7 @@ class MfService(_Service):
                 if source:
                     src = source.get("src", "")
             if src:
-                return src
+                return _absolute(src)
 
         return None
 
@@ -147,10 +227,14 @@ class MfService(_Service):
             limit = self.config.search_results
         start_time = time.perf_counter()
 
-        client = self._get_client()
+        q = quote((query or "").strip())
+        if not q:
+            raise errors.NothingFoundError("")
+
+        # Запрос уходит в путь URL: без экранирования пробелы и «&» ломают
+        # адрес, а кириллица уходит в сеть в неверной кодировке.
         try:
-            resp = client.get(f"https://muzofond.fm/search/{query}")
-            resp.raise_for_status()
+            resp = self._request(f"/search/{q}")
         except Exception as e:
             logging.error(f"Muzofond search failed: {e}")
             raise errors.NothingFoundError(str(e))
@@ -164,28 +248,18 @@ class MfService(_Service):
             url = item.get("url", "")
             title = item.get("title", "")
             artist = item.get("artist", "")
-            full_title = f"{artist} - {title}" if artist and artist not in title else title
+            full_title = _join_name(artist, title)
 
-            if item.get("is_page"):
-                track = Track(
-                    service=self.name,
-                    url=url,
-                    name=full_title,
-                    type=TrackType.Dynamic,
-                    extra_info={"page_url": url, "title": title, "artist": artist},
-                )
-            else:
-                track = Track(
-                    service=self.name,
-                    url=url,
-                    name=full_title,
-                    format="mp3",
-                    type=TrackType.Default,
-                    extra_info={"stream_url": url, "title": title, "artist": artist},
-                    extracted_at=time.perf_counter(),
-                )
-                track._is_fetched = True
-
+            track = Track(
+                service=self.name,
+                url=url,
+                name=full_title,
+                format="mp3",
+                type=TrackType.Default,
+                extra_info={"stream_url": url, "title": title, "artist": artist},
+                extracted_at=time.perf_counter(),
+            )
+            track._is_fetched = True
             tracks.append(track)
 
         elapsed = (time.perf_counter() - start_time) * 1000
@@ -203,23 +277,23 @@ class MfService(_Service):
         info = dict(extra_info or {})
         page_url = info.get("page_url") or url
 
-        stream_url = info.get("stream_url", "")
-        if stream_url and "dl3s" in stream_url:
+        stream_url = _absolute(info.get("stream_url", ""))
+        if _looks_like_audio(stream_url):
             audio_url = stream_url
-        elif url and "dl3s" in url:
-            audio_url = url
+        elif _looks_like_audio(url):
+            audio_url = _absolute(url)
         else:
             audio_url = ""
+
+        title = info.get("title", "")
+        artist = info.get("artist", "")
+        full_title = _join_name(artist, title)
 
         if process:
             if not audio_url:
                 audio_url = self._extract_audio_url(page_url)
             if not audio_url:
                 raise errors.ServiceError("Muzofond: Could not extract audio URL")
-
-            title = info.get("title", "")
-            artist = info.get("artist", "")
-            full_title = f"{artist} - {title}" if artist and artist not in title else title
 
             elapsed = (time.perf_counter() - start_time) * 1000
             logging.info(f"Muzofond Get (Process) finished in {elapsed:.2f}ms for {full_title}")
@@ -240,7 +314,7 @@ class MfService(_Service):
             return [Track(
                 service=self.name,
                 url=audio_url,
-                name=info.get("title", ""),
+                name=title,
                 format="mp3",
                 type=TrackType.Default,
                 extra_info=info,
@@ -250,7 +324,7 @@ class MfService(_Service):
         track = Track(
             service=self.name,
             url=page_url,
-            name=info.get("title", ""),
+            name=title,
             type=TrackType.Dynamic,
             extra_info=info or {"page_url": page_url},
         )
@@ -258,7 +332,6 @@ class MfService(_Service):
         elapsed = (time.perf_counter() - start_time) * 1000
         logging.info(f"Muzofond Get (Dynamic) finished in {elapsed:.2f}ms for {page_url}")
         return [track]
-
 
     def _fetch_autoplay_async(self, track_id: str) -> None:
         threading.Thread(
@@ -282,20 +355,12 @@ class MfService(_Service):
             if not artist and not title:
                 return False
 
-            query = f"{artist} {title}" if artist else title
-            client = self._get_client()
-            resp = client.get(f"https://muzofond.fm/search/{query}")
-            resp.raise_for_status()
-
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            items_by_id = {}
-            for item in soup.select("li[data-id]"):
-                did = item.get("data-id", "")
-                if did not in items_by_id:
-                    items_by_id[did] = []
-                items_by_id[did].append(item)
+            query = quote(f"{artist} {title}".strip())
+            try:
+                resp = self._request(f"/search/{query}")
+            except Exception as e:
+                logging.debug(f"[MF] Autoplay search error: {e}")
+                return False
 
             existing_urls = set()
             for t in self.bot.player.track_list:
@@ -305,30 +370,15 @@ class MfService(_Service):
                     existing_urls.add(u)
 
             new_tracks = []
-            for did, elems in items_by_id.items():
-                url = ""
-                title_text = ""
-                for el in elems:
-                    u = el.get("data-url", "")
-                    if u and "dl3s" in u:
-                        url = u
-                    t = el.get_text(strip=True)
-                    if t:
-                        title_text = t
+            for item in parse_items(resp.text, self.config.search_results):
+                url = item.get("url", "")
                 if not url or url in existing_urls:
                     continue
+                t_artist = item.get("artist", "")
+                t_title = item.get("title", "")
+                full_title = _join_name(t_artist, t_title)
 
-                parts = re.split(r"\u2014|\u2013|-", title_text, maxsplit=1)
-                t_artist = parts[0].strip() if len(parts) > 1 else ""
-                t_title = parts[1].strip() if len(parts) > 1 else title_text.strip()
-
-                time_match = re.search(r"(\d{1,2}:\d{2})$", t_title)
-                if time_match:
-                    t_title = t_title[:time_match.start()].strip()
-
-                full_title = f"{t_artist} - {t_title}" if t_artist and t_artist not in t_title else t_title
-
-                new_tracks.append(Track(
+                new_track = Track(
                     service=self.name,
                     url=url,
                     name=full_title,
@@ -336,8 +386,9 @@ class MfService(_Service):
                     type=TrackType.Default,
                     extra_info={"stream_url": url, "title": t_title, "artist": t_artist},
                     extracted_at=time.perf_counter(),
-                ))
-                new_tracks[-1]._is_fetched = True
+                )
+                new_track._is_fetched = True
+                new_tracks.append(new_track)
                 existing_urls.add(url)
 
             if new_tracks:
@@ -350,16 +401,19 @@ class MfService(_Service):
         return False
 
     def download(self, track: Track, file_path: str, video: bool = False) -> None:
-        info = track.extra_info or {}
-        audio_url = info.get("stream_url", "")
+        import downloader
 
-        if not audio_url:
+        info = track.extra_info or {}
+        audio_url = _absolute(info.get("stream_url", ""))
+
+        if not _looks_like_audio(audio_url):
             page_url = info.get("page_url") or track.url
             audio_url = self._extract_audio_url(page_url)
 
-        if audio_url:
-            downloader = __import__("downloader")
-            downloader.download_file(audio_url, file_path)
-        else:
-            downloader = __import__("downloader")
-            downloader.download_file(track.url, file_path)
+        if not _looks_like_audio(audio_url):
+            audio_url = _absolute(track.url)
+
+        if not audio_url:
+            raise errors.ServiceError("Muzofond: нечего скачивать — пустая ссылка")
+
+        downloader.download_file(audio_url, file_path)

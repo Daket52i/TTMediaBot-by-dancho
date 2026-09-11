@@ -9,6 +9,25 @@ LANG="ru"
 REPO_URL="https://github.com/Daket52i/TTMediaBot-by-dancho.git"
 REPO_SSH="git@github.com:Daket52i/TTMediaBot-by-dancho.git"
 
+# Установка идёт в системные пакеты и в user-systemd, поэтому нужен root.
+# Раньше скрипт всегда звал sudo и на сервере без sudo падал молча.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  echo "Ошибка: нужны права root. Запустите скрипт от root или установите sudo."
+  echo "Error: root privileges required. Run as root or install sudo."
+  exit 1
+fi
+
+# Флаги pip выставляются в install_dependencies, когда pip уже установлен.
+PIP_FLAGS=""
+
+# $USER в неинтерактивном сеансе (su, cron, часть SSH-оболочек) пустой —
+# loginctl тогда падал с пустым аргументом. Берём фактического пользователя.
+BOT_USER="${USER:-$(id -un)}"
+
 select_language() {
   echo "Выберите язык / Select language / Wybierz język / Seleccione idioma:"
   echo "1. Русский"
@@ -36,6 +55,22 @@ msg() {
   esac
 }
 
+# systemctl --user из обычного SSH-сеанса root часто не работает: нет шины
+# пользовательской сессии. Под set -e каждая такая команда молча убивала
+# установку. Обёртка выставляет окружение и возвращает код ошибки.
+userctl() {
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  fi
+  systemctl --user "$@"
+}
+
+# Проверка, живёт ли пользовательский systemd — чтобы предупредить один раз.
+user_systemd_works() {
+  userctl is-system-running >/dev/null 2>&1 || userctl status >/dev/null 2>&1
+}
+
 # ————————————————————————————
 # Основные функции
 # ————————————————————————————
@@ -46,18 +81,42 @@ install_dependencies() {
     "Instalowanie wymaganych pakietów..." \
     "Instalando paquetes necesarios..."
   
-  sudo apt-get update -qq >/dev/null 2>&1
-  sudo apt-get install -qq -y git gnulib python3-dev python-is-python3 python3-pip \
-    p7zip-full libmpv-dev cron pipewire pipewire-pulse wireplumber libspa-0.2-bluetooth \
-    wget curl nodejs npm >/dev/null 2>&1
+  # Node.js здесь больше не ставится: он был нужен только YouTube-бриджу,
+  # а YouTube из бота убран.
+  $SUDO apt-get update -qq
 
-  msg \
-    "Установка Python библиотек..." \
-    "Installing Python libraries..." \
-    "Instalowanie bibliotek Pythona..." \
-    "Instalando bibliotecas Python..."
-  
-  pip install --break-system-packages httpx==0.27.0 beautifulsoup4 --no-warn-script-location >/dev/null 2>&1
+  # Обязательные пакеты. Если хоть один не поставится — установку прекращаем
+  # с внятной ошибкой, а не молчаливым выходом в середине скрипта.
+  #   ffmpeg        — скачивание видео с Rutube
+  #   libmpv-dev    — даёт libmpv.so, который ищет плеер бота
+  #   p7zip-full    — распаковка архива TeamTalk SDK
+  #   ca-certificates/gnupg/wget/curl — https, ключи, скачивание
+  if ! $SUDO apt-get install -qq -y \
+      git python3-dev python-is-python3 python3-pip python3-venv \
+      p7zip-full libmpv-dev cron wget curl ca-certificates gnupg ffmpeg; then
+    msg \
+      "Не удалось установить обязательные пакеты (см. вывод apt выше). Установка остановлена." \
+      "Failed to install required packages (see apt output above). Installation stopped." \
+      "Nie udało się zainstalować wymaganych pakietów. Instalacja zatrzymana." \
+      "No se pudieron instalar los paquetes necesarios. Instalación detenida."
+    exit 1
+  fi
+
+  # Необязательные пакеты звука: без них бот работает через системный звук.
+  # Их отсутствие установку не срывает.
+  $SUDO apt-get install -qq -y pipewire pipewire-pulse wireplumber libspa-0.2-bluetooth || \
+    msg \
+      "Предупреждение: пакеты звука (pipewire) не установились — продолжаем без них." \
+      "Warning: audio packages (pipewire) failed to install — continuing without them." \
+      "Uwaga: pakiety dźwięku nie zainstalowały się — kontynuujemy bez nich." \
+      "Aviso: los paquetes de audio no se instalaron — continuamos sin ellos."
+
+  # pip в Debian 12 / Ubuntu 24 требует --break-system-packages (PEP 668),
+  # а на Ubuntu 22.04 (pip 22) такого флага ещё нет — иначе установка падала.
+  python3 -m pip install --upgrade pip >/dev/null 2>&1 || true
+  if python3 -m pip install --help 2>/dev/null | grep -q -- "--break-system-packages"; then
+    PIP_FLAGS="--break-system-packages"
+  fi
 }
 
 setup_github_ssh() {
@@ -108,7 +167,14 @@ setup_pipewire() {
     "Konfigurowanie PipeWire..." \
     "Configurando PipeWire..."
   
-  systemctl --user --now enable pipewire pipewire-pulse >/dev/null 2>&1
+  if ! userctl --now enable pipewire pipewire-pulse >/dev/null 2>&1; then
+    msg \
+      "Предупреждение: не удалось включить PipeWire — звук будет браться из системных настроек." \
+      "Warning: could not start PipeWire — using system audio settings." \
+      "Uwaga: nie udało się uruchomić PipeWire — używane będą ustawienia systemowe." \
+      "Aviso: no se pudo iniciar PipeWire — se usarán los ajustes de audio del sistema."
+    return 0
+  fi
 
   msg \
     "PipeWire успешно настроен" \
@@ -147,8 +213,14 @@ Type=oneshot
 ExecStart=/usr/bin/systemctl --user restart bot.service
 EOF
 
-  systemctl --user daemon-reload >/dev/null 2>&1
-  systemctl --user enable --now bot-restart.timer >/dev/null 2>&1
+  userctl daemon-reload >/dev/null 2>&1 || true
+  if ! userctl enable --now bot-restart.timer >/dev/null 2>&1; then
+    msg \
+      "Предупреждение: таймер ежедневной перезагрузки не включился." \
+      "Warning: daily restart timer could not be enabled." \
+      "Uwaga: nie udało się włączyć timera restartu." \
+      "Aviso: no se pudo activar el temporizador de reinicio diario."
+  fi
 
   msg \
     "Таймер перезагрузки установлен на 03:00 ежедневно" \
@@ -164,14 +236,14 @@ cleanup_previous_installation() {
     "Usuwanie poprzedniej instalacji..." \
     "Eliminando instalación anterior..."
   
-  systemctl --user stop bot.service bot-restart.timer bot-restart.service >/dev/null 2>&1 || true
-  systemctl --user disable bot.service bot-restart.timer bot-restart.service >/dev/null 2>&1 || true
+  userctl stop bot.service bot-restart.timer bot-restart.service >/dev/null 2>&1 || true
+  userctl disable bot.service bot-restart.timer bot-restart.service >/dev/null 2>&1 || true
   rm -f "$HOME/.config/systemd/user/bot.service" \
         "$HOME/.config/systemd/user/bot-restart.timer" \
         "$HOME/.config/systemd/user/bot-restart.service"
   rm -rf "$BOT_DIR"
-  
-  systemctl --user daemon-reload >/dev/null 2>&1
+
+  userctl daemon-reload >/dev/null 2>&1 || true
 }
 
 cleanup_git_credentials() {
@@ -219,34 +291,15 @@ install_requirements() {
     "Instalando requisitos de Python..."
   
   cd "$BOT_DIR" || exit 1
-  pip install --break-system-packages --no-warn-script-location -r requirements.txt >/dev/null 2>&1
-}
-
-install_npm_bridge() {
-  msg \
-    "Установка npm зависимостей для YouTube бриджа..." \
-    "Installing npm dependencies for YouTube bridge..." \
-    "Instalowanie zależności npm dla YouTube bridge..." \
-    "Instalando dependencias npm para YouTube bridge..."
-  
-  cd "$BOT_DIR/youtube_bridge" || exit 1
-  
-  if [ -f "package.json" ]; then
-    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519 -o StrictHostKeyChecking=no" npm install 2>&1 | tail -5
-    
-    if [ $? -eq 0 ]; then
-      msg \
-        "npm зависимости установлены" \
-        "npm dependencies installed" \
-        "Zależności npm zainstalowane" \
-        "Dependencias npm instaladas"
-    else
-      msg \
-        "Ошибка установки npm依赖. YouTube бридж может не работать." \
-        "Error installing npm deps. YouTube bridge may not work." \
-        "Błąd instalacji zależności npm. YouTube bridge może nie działać." \
-        "Error instalando dependencias npm. YouTube bridge puede no funcionar."
-    fi
+  # Тишина при успехе, полный лог pip — при ошибке.
+  if ! python3 -m pip install $PIP_FLAGS --no-warn-script-location -r requirements.txt > /tmp/ttbot_pip.log 2>&1; then
+    msg \
+      "Ошибка установки Python-зависимостей. Последние строки лога:" \
+      "Failed to install Python requirements. Last log lines:" \
+      "Błąd instalacji zależności Pythona. Ostatnie linie logu:" \
+      "Error al instalar dependencias de Python. Últimas líneas del log:"
+    tail -n 25 /tmp/ttbot_pip.log
+    exit 1
   fi
 }
 
@@ -260,160 +313,139 @@ download_tools() {
   cd "$BOT_DIR/tools" || exit 1
 
   msg \
-    "Обновление версии TT SDK до 5.22..." \
-    "Updating TT SDK version to 5.22..." \
-    "Aktualizowanie wersji TT SDK do 5.22..." \
-    "Actualizando versión de TT SDK a 5.22..."
-  
-  if [ -f "ttsdk_downloader.py" ]; then
-    sed 's/version = \[i for i in versions if "5\.19" in i\.text\]\[-1\]\.a\.get("href")\[0:-1\]/version = [i for i in versions if "5.22" in i.text][-1].a.get("href")[0:-1]/' ttsdk_downloader.py > ttsdk_downloader_temp.py
-    
-    if cmp -s ttsdk_downloader.py ttsdk_downloader_temp.py; then
-      msg \
-        "Версия уже обновлена до 5.22" \
-        "Version already updated to 5.22" \
-        "Wersja już zaktualizowana do 5.22" \
-        "Versión ya actualizada a 5.22"
-    else
-      mv ttsdk_downloader_temp.py ttsdk_downloader.py
-      msg \
-        "Версия успешно обновлена до 5.22" \
-        "Version successfully updated to 5.22" \
-        "Wersja pomyślnie zaktualizowana do 5.22" \
-        "Versión actualizada correctamente a 5.22"
-    fi
-    rm -f ttsdk_downloader_temp.py
-  else
-    msg \
-      "Файл ttsdk_downloader.py не найден" \
-      "File ttsdk_downloader.py not found" \
-      "Nie znaleziono pliku ttsdk_downloader.py" \
-      "Archivo ttsdk_downloader.py no encontrado"
-  fi
-  
-  msg \
     "Загрузка TT SDK..." \
     "Downloading TT SDK..." \
     "Pobieranie TT SDK..." \
     "Descargando TT SDK..."
-  
-  if ! python ttsdk_downloader.py >/dev/null 2>&1; then
+
+  ARCH=$(uname -m)
+  if [ "$ARCH" = "x86_64" ]; then
+    SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z"
+  elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    # Именно raspbian_arm64: сборки armhf в 5.22a нет, старая ссылка
+    # ..._raspbian_armhf.7z отдаёт 404 и установка падала.
+    SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_raspbian_arm64.7z"
+  else
     msg \
-      "Ошибка при загрузке через ttsdk_downloader.py. Выполняем ручную загрузку..." \
-      "Error downloading via ttsdk_downloader.py. Performing manual download..." \
-      "Błąd pobierania przez ttsdk_downloader.py. Wykonujemy ręczne pobieranie..." \
-      "Error al descargar mediante ttsdk_downloader.py. Realizando descarga manual..."
-    
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "x86_64" ]; then
-      SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z"
-    elif [[ "$ARCH" == arm* ]] || [ "$ARCH" = "aarch64" ]; then
-      SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_raspbian_armhf.7z"
-    else
-      msg \
-        "Неизвестная архитектура: $ARCH. Использую x86_64..." \
-        "Unknown architecture: $ARCH. Using x86_64..." \
-        "Nieznana architektura: $ARCH. Używam x86_64..." \
-        "Arquitectura desconocida: Usando x86_64..."
-      SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z"
-    fi
-    
+      "Неизвестная архитектура: $ARCH. Использую x86_64..." \
+      "Unknown architecture: $ARCH. Using x86_64..." \
+      "Nieznana architektura: $ARCH. Używam x86_64..." \
+      "Arquitectura desconocida: Usando x86_64..."
+    SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z"
+  fi
+
+  msg \
+    "Скачивание SDK с $SDK_URL" \
+    "Downloading SDK from $SDK_URL" \
+    "Pobieranie SDK z $SDK_URL" \
+    "Descargando SDK de $SDK_URL"
+
+  rm -f ttsdk.7z
+  if command -v wget &> /dev/null; then
+    wget -q --show-progress "$SDK_URL" -O ttsdk.7z || true
+  else
+    curl -L --progress-bar "$SDK_URL" -o ttsdk.7z || true
+  fi
+
+  # Обрыв связи раньше оставлял пустой файл, и установка «успешно» завершалась.
+  if [ ! -s "ttsdk.7z" ]; then
     msg \
-      "Скачивание SDK с $SDK_URL" \
-      "Downloading SDK from $SDK_URL" \
-      "Pobieranie SDK z $SDK_URL" \
-      "Descargando SDK de $SDK_URL"
-    
-    if command -v wget &> /dev/null; then
-      wget -q --show-progress "$SDK_URL" -O ttsdk.7z
-    elif command -v curl &> /dev/null; then
-      curl -L --progress-bar "$SDK_URL" -o ttsdk.7z
-    else
-      sudo apt-get install -y wget >/dev/null 2>&1
-      wget -q --show-progress "$SDK_URL" -O ttsdk.7z
+      "Не удалось скачать TeamTalk SDK. Без него бот не подключится к серверу. Установка остановлена." \
+      "Failed to download TeamTalk SDK. Without it the bot cannot connect. Installation stopped." \
+      "Nie udało się pobrać TeamTalk SDK. Bez niego bot się nie połączy. Instalacja zatrzymana." \
+      "No se pudo descargar el SDK de TeamTalk. Sin él el bot no se conectará. Instalación detenida."
+    rm -f ttsdk.7z
+    exit 1
+  fi
+
+  msg \
+    "Распаковка SDK..." \
+    "Extracting SDK..." \
+    "Rozpakowywanie SDK..." \
+    "Extrayendo SDK..."
+
+  rm -rf ttsdk
+  mkdir -p ttsdk
+
+  if ! command -v 7z &> /dev/null; then
+    $SUDO apt-get install -qq -y p7zip-full >/dev/null 2>&1 || true
+  fi
+  if ! command -v 7z &> /dev/null; then
+    msg \
+      "Не найден 7z (пакет p7zip-full). Распаковать SDK нечем, установка остановлена." \
+      "7z not found (package p7zip-full). Cannot extract SDK, installation stopped." \
+      "Nie znaleziono 7z (pakiet p7zip-full). Nie można rozpakować SDK, instalacja zatrzymana." \
+      "No se encontró 7z (paquete p7zip-full). No se puede extraer el SDK, instalación detenida."
+    rm -f ttsdk.7z
+    exit 1
+  fi
+  if ! 7z x ttsdk.7z -ottsdk > /tmp/ttbot_7z.log 2>&1; then
+    msg \
+      "Не удалось распаковать архив SDK. Последние строки лога:" \
+      "Failed to extract the SDK archive. Last log lines:" \
+      "Nie udało się rozpakować archiwum SDK. Ostatnie linie logu:" \
+      "No se pudo extraer el archivo del SDK. Últimas líneas del log:"
+    tail -n 15 /tmp/ttbot_7z.log
+    rm -f ttsdk.7z
+    exit 1
+  fi
+
+  # -print -quit вместо head: без SIGPIPE, который под pipefail убивал скрипт.
+  EXTRACTED_DIR=$(find ttsdk -maxdepth 1 -mindepth 1 -type d -name "tt5sdk_*" -print -quit)
+
+  if [ -n "$EXTRACTED_DIR" ]; then
+    msg \
+      "Перемещение файлов SDK..." \
+      "Moving SDK files..." \
+      "Przenoszenie plików SDK..." \
+      "Moviendo archivos SDK..."
+
+    DEST_DIR="$BOT_DIR"
+
+    if [ -d "$EXTRACTED_DIR/Library/TeamTalk_DLL" ]; then
+      rm -rf "$DEST_DIR/TeamTalk_DLL"
+      cp -r "$EXTRACTED_DIR/Library/TeamTalk_DLL" "$DEST_DIR/"
+      msg \
+        "TeamTalk_DLL установлен" \
+        "TeamTalk_DLL installed" \
+        "TeamTalk_DLL zainstalowany" \
+        "TeamTalk_DLL instalado"
     fi
-    
-    if [ -f "ttsdk.7z" ]; then
+
+    if [ -d "$EXTRACTED_DIR/Library/TeamTalkPy" ]; then
+      rm -rf "$DEST_DIR/TeamTalkPy"
+      cp -r "$EXTRACTED_DIR/Library/TeamTalkPy" "$DEST_DIR/"
       msg \
-        "Распаковка SDK..." \
-        "Extracting SDK..." \
-        "Rozpakowywanie SDK..." \
-        "Extrayendo SDK..."
-      
-      rm -rf ttsdk
-      mkdir -p ttsdk
-      
-      if command -v 7z &> /dev/null; then
-        7z x ttsdk.7z -ottsdk >/dev/null 2>&1
-      else
-        sudo apt-get install -y p7zip-full >/dev/null 2>&1
-        7z x ttsdk.7z -ottsdk >/dev/null 2>&1
-      fi
-      
-      EXTRACTED_DIR=$(find ttsdk -maxdepth 1 -type d -name "tt5sdk_*" | head -n 1)
-      
-      if [ -n "$EXTRACTED_DIR" ]; then
-        msg \
-          "Перемещение файлов SDK..." \
-          "Moving SDK files..." \
-          "Przenoszenie plików SDK..." \
-          "Moviendo archivos SDK..."
-        
-        DEST_DIR="$BOT_DIR"
-        
-        if [ -d "$EXTRACTED_DIR/Library/TeamTalk_DLL" ]; then
-          rm -rf "$DEST_DIR/TeamTalk_DLL"
-          cp -r "$EXTRACTED_DIR/Library/TeamTalk_DLL" "$DEST_DIR/"
-          msg \
-            "TeamTalk_DLL установлен" \
-            "TeamTalk_DLL installed" \
-            "TeamTalk_DLL zainstalowany" \
-            "TeamTalk_DLL instalado"
-        fi
-        
-        if [ -d "$EXTRACTED_DIR/Library/TeamTalkPy" ]; then
-          rm -rf "$DEST_DIR/TeamTalkPy"
-          cp -r "$EXTRACTED_DIR/Library/TeamTalkPy" "$DEST_DIR/"
-          msg \
-            "TeamTalkPy установлен" \
-            "TeamTalkPy installed" \
-            "TeamTalkPy zainstalowany" \
-            "TeamTalkPy instalado"
-        fi
-        
-        if [ -f "$EXTRACTED_DIR/License.txt" ]; then
-          cp "$EXTRACTED_DIR/License.txt" "$DEST_DIR/TTSDK_license.txt"
-          msg \
-            "Лицензия установлена" \
-            "License installed" \
-            "Licencja zainstalowana" \
-            "Licencia instalada"
-        fi
-        
-        msg \
-          "SDK успешно установлен вручную" \
-          "SDK successfully installed manually" \
-          "SDK pomyślnie zainstalowany ręcznie" \
-          "SDK instalado correctamente manualmente"
-      else
-        msg \
-          "Не удалось найти распакованные файлы SDK" \
-          "Failed to find extracted SDK files" \
-          "Nie znaleziono rozpakowanych plików SDK" \
-          "No se encontraron archivos SDK extraídos"
-      fi
-      
-      rm -f ttsdk.7z
-      rm -rf ttsdk
-    else
+        "TeamTalkPy установлен" \
+        "TeamTalkPy installed" \
+        "TeamTalkPy zainstalowany" \
+        "TeamTalkPy instalado"
+    fi
+
+    if [ -f "$EXTRACTED_DIR/License.txt" ]; then
+      cp "$EXTRACTED_DIR/License.txt" "$DEST_DIR/TTSDK_license.txt"
       msg \
-        "Не удалось скачать SDK. Пожалуйста, скачайте вручную." \
-        "Failed to download SDK. Please download manually." \
-        "Nie udało się pobrać SDK. Proszę pobrać ręcznie." \
-        "Error al descargar SDK. Por favor descargue manualmente."
+        "Лицензия установлена" \
+        "License installed" \
+        "Licencja zainstalowana" \
+        "Licencia instalada"
     fi
   fi
-  
+
+  rm -f ttsdk.7z
+  rm -rf ttsdk
+
+  # Раньше отсутствие библиотеки замечалось только на старте бота — сервис
+  # уходил в бесконечный рестарт уже после «успешной» установки.
+  if [ ! -f "$BOT_DIR/TeamTalk_DLL/libTeamTalk5.so" ] || [ ! -f "$BOT_DIR/TeamTalkPy/TeamTalk5.py" ]; then
+    msg \
+      "SDK распакован не полностью: нет TeamTalk_DLL/libTeamTalk5.so или TeamTalkPy. Установка остановлена." \
+      "SDK extracted incompletely: TeamTalk_DLL/libTeamTalk5.so or TeamTalkPy missing. Installation stopped." \
+      "SDK rozpakowany niekompletnie: brak TeamTalk_DLL/libTeamTalk5.so lub TeamTalkPy. Instalacja zatrzymana." \
+      "SDK extraído de forma incompleta: falta TeamTalk_DLL/libTeamTalk5.so o TeamTalkPy. Instalación detenida."
+    exit 1
+  fi
+
   msg \
     "Компиляция языков..." \
     "Compiling languages..." \
@@ -447,17 +479,41 @@ create_config() {
     "Wprowadź hostname serwera: " \
     "Ingrese el hostname del servidor: ")" hostname
   
-  read -p "$(msg \
-    "Введите TCP порт: " \
-    "Enter TCP port: " \
-    "Wprowadź port TCP: " \
-    "Ingrese puerto TCP: ")" tcp_port
+  # Порт спрашиваем в цикле: раньше нечисловой ввод молча ломал конфиг,
+  # и бот падал уже после установки.
+  while :; do
+    read -p "$(msg \
+      "Введите TCP порт (по умолчанию 10333): " \
+      "Enter TCP port (default 10333): " \
+      "Wprowadź port TCP (domyślnie 10333): " \
+      "Ingrese puerto TCP (por defecto 10333): ")" tcp_port
+    tcp_port=${tcp_port:-10333}
+    if [[ "$tcp_port" =~ ^[0-9]+$ ]] && [ "$tcp_port" -ge 1 ] && [ "$tcp_port" -le 65535 ]; then
+      break
+    fi
+    msg \
+      "Порт должен быть числом от 1 до 65535." \
+      "The port must be a number between 1 and 65535." \
+      "Port musi być liczbą od 1 do 65535." \
+      "El puerto debe ser un número entre 1 y 65535."
+  done
   
-  read -p "$(msg \
-    "Введите UDP порт: " \
-    "Enter UDP port: " \
-    "Wprowadź port UDP: " \
-    "Ingrese puerto UDP: ")" udp_port
+  while :; do
+    read -p "$(msg \
+      "Введите UDP порт (по умолчанию 10333): " \
+      "Enter UDP port (default 10333): " \
+      "Wprowadź port UDP (domyślnie 10333): " \
+      "Ingrese puerto UDP (por defecto 10333): ")" udp_port
+    udp_port=${udp_port:-10333}
+    if [[ "$udp_port" =~ ^[0-9]+$ ]] && [ "$udp_port" -ge 1 ] && [ "$udp_port" -le 65535 ]; then
+      break
+    fi
+    msg \
+      "Порт должен быть числом от 1 до 65535." \
+      "The port must be a number between 1 and 65535." \
+      "Port musi być liczbą od 1 do 65535." \
+      "El puerto debe ser un número entre 1 y 65535."
+  done
   
   read -p "$(msg \
     "Используется ли шифрование на сервере? (y/n): " \
@@ -477,11 +533,23 @@ create_config() {
     "Wprowadź nick bota: " \
     "Ingrese apodo del bot: ")" nickname
   
-  read -p "$(msg \
-    "Введите пол бота (m/f/n): " \
-    "Enter bot gender (m/f/n): " \
-    "Wprowadź płeć bota (m/f/n): " \
-    "Ingrese género del bot (m/f/n): ")" gender
+  # Бот понимает только m/f/n (иначе KeyError на старте), поэтому проверяем.
+  while :; do
+    read -p "$(msg \
+      "Введите пол бота (m/f/n, по умолчанию n): " \
+      "Enter bot gender (m/f/n, default n): " \
+      "Wprowadź płeć bota (m/f/n, domyślnie n): " \
+      "Ingrese género del bot (m/f/n, por defecto n): ")" gender
+    gender=$(echo "${gender:-n}" | tr '[:upper:]' '[:lower:]')
+    case "$gender" in
+      m|f|n) break ;;
+    esac
+    msg \
+      "Пол может быть только m, f или n." \
+      "Gender can only be m, f or n." \
+      "Płeć może być tylko m, f lub n." \
+      "El género solo puede ser m, f o n."
+  done
   
   read -p "$(msg \
     "Введите имя пользователя: " \
@@ -510,27 +578,58 @@ create_config() {
     "Ingrese contraseña del canal (si tiene): ")"; echo
   channel_password="$REPLY"
 
-  sed -i "s/\"hostname\": \".*\"/\"hostname\": \"$hostname\"/" config.json
-  sed -i "s/\"tcp_port\": [0-9]\+/\"tcp_port\": $tcp_port/" config.json
-  sed -i "s/\"udp_port\": [0-9]\+/\"udp_port\": $udp_port/" config.json
-  sed -i "s/\"encrypted\": [^,]*/\"encrypted\": $encrypted_value/" config.json
-  sed -i "s/\"nickname\": \".*\"/\"nickname\": \"$nickname\"/" config.json
-  sed -i "s/\"gender\": \".\"/\"gender\": \"$gender\"/" config.json
-  sed -i "s/\"username\": \".*\"/\"username\": \"$username\"/" config.json
-  sed -i "s/\"password\": \".*\"/\"password\": \"$password\"/" config.json
-  sed -i "s|\"channel\": \".*\"|\"channel\": \"$channel_name\"|" config.json
-  sed -i "s|\"channel_password\": \".*\"|\"channel_password\": \"$channel_password\"|" config.json
+  # Правим JSON через python, а не sed: sed ломал конфиг, если в пароле или
+  # названии канала встречались кавычки, слэш или обратный слэш.
+  # Значения передаём через окружение — так они не интерпретируются шеллом.
+  TT_CFG_HOSTNAME="$hostname" \
+  TT_CFG_TCP="$tcp_port" \
+  TT_CFG_UDP="$udp_port" \
+  TT_CFG_ENCRYPTED="$encrypted_value" \
+  TT_CFG_NICKNAME="$nickname" \
+  TT_CFG_GENDER="$gender" \
+  TT_CFG_USERNAME="$username" \
+  TT_CFG_PASSWORD="$password" \
+  TT_CFG_CHANNEL="$channel_name" \
+  TT_CFG_CHANNEL_PASSWORD="$channel_password" \
+  python3 - <<'PYEOF' || exit 1
+import json
+import os
 
-  sed -i "s/\"output_device\": [0-9]\+/\"output_device\": 1/" config.json
-  sed -i "s/\"default_service\": \".*\"/\"default_service\": \"yt\"/" config.json
+with open("config.json", encoding="utf-8") as f:
+    cfg = json.load(f)
 
-  read -p "$(msg \
-    "Введите полный путь к файлу cookies.txt (Enter пропустить): " \
-    "Enter full path to cookies.txt file (Enter to skip): " \
-    "Wprowadź pełną ścieżkę do pliku cookies.txt (Enter aby pominąć): " \
-    "Ingrese la ruta completa al archivo cookies.txt (Enter para omitir): ")" cookiefile
-  if [ -n "$cookiefile" ]; then
-    sed -i "s|\"cookiefile_path\": \".*\"|\"cookiefile_path\": \"$cookiefile\"|" config.json
+tt = cfg.setdefault("teamtalk", {})
+tt["hostname"] = os.environ["TT_CFG_HOSTNAME"]
+tt["tcp_port"] = int(os.environ["TT_CFG_TCP"])
+tt["udp_port"] = int(os.environ["TT_CFG_UDP"])
+tt["encrypted"] = os.environ["TT_CFG_ENCRYPTED"] == "true"
+tt["nickname"] = os.environ["TT_CFG_NICKNAME"]
+tt["gender"] = os.environ["TT_CFG_GENDER"]
+tt["username"] = os.environ["TT_CFG_USERNAME"]
+tt["password"] = os.environ["TT_CFG_PASSWORD"]
+tt["channel"] = os.environ["TT_CFG_CHANNEL"]
+tt["channel_password"] = os.environ["TT_CFG_CHANNEL_PASSWORD"]
+
+# Основной сервис — музофонд. YouTube из бота убран, спрашивать про
+# cookies.txt больше нечего.
+cfg.setdefault("services", {})["default_service"] = "mf"
+
+# output_device намеренно не трогаем: на сервере без второго устройства
+# вывода бот падал с IndexError и уходил в рестарт. Остаётся 0 из шаблона.
+
+tmp = "config.json.tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=4)
+os.replace(tmp, "config.json")
+PYEOF
+
+  if [ ! -s "config.json" ]; then
+    msg \
+      "Не удалось записать config.json. Установка остановлена." \
+      "Failed to write config.json. Installation stopped." \
+      "Nie udało się zapisać config.json. Instalacja zatrzymana." \
+      "No se pudo escribir config.json. Instalación detenida."
+    exit 1
   fi
 
   msg \
@@ -567,8 +666,17 @@ RestartSec=10
 WantedBy=default.target
 EOF
 
-  systemctl --user daemon-reload >/dev/null 2>&1
-  systemctl --user enable --now bot >/dev/null 2>&1
+  chmod +x "$BOT_DIR/TTMediaBot.sh" 2>/dev/null || true
+
+  userctl daemon-reload >/dev/null 2>&1 || true
+  if ! userctl enable --now bot >/dev/null 2>&1; then
+    msg \
+      "Внимание: сервис создан, но не запустился. Проверьте: systemctl --user status bot" \
+      "Attention: service created but not started. Check: systemctl --user status bot" \
+      "Uwaga: usługa utworzona, ale nie uruchomiona. Sprawdź: systemctl --user status bot" \
+      "Atención: el servicio se creó pero no se inició. Verifique: systemctl --user status bot"
+    return 0
+  fi
 
   msg \
     "Сервис успешно установлен и запущен" \
@@ -584,7 +692,13 @@ enable_linger() {
     "Włączanie linger dla użytkownika..." \
     "Habilitando linger para el usuario..."
   
-  sudo loginctl enable-linger "$USER" >/dev/null 2>&1
+  if ! $SUDO loginctl enable-linger "$BOT_USER" >/dev/null 2>&1; then
+    msg \
+      "Предупреждение: не удалось включить linger — сервис может останавливаться при выходе из SSH." \
+      "Warning: could not enable linger — the service may stop when the SSH session ends." \
+      "Uwaga: nie udało się włączyć linger — usługa może zatrzymać się po wyjściu z SSH." \
+      "Aviso: no se pudo habilitar linger — el servicio puede detenerse al cerrar SSH."
+  fi
 }
 
 # ————————————————————————————
@@ -625,13 +739,21 @@ main() {
   cleanup_previous_installation
   clone_repository
   install_requirements
-  install_npm_bridge
   download_tools
   setup_pipewire
   create_config
+  # linger включаем до старта сервиса: иначе бот стартует в сессии SSH и
+  # гаснет, как только установщик закрывает соединение.
+  enable_linger
+  if ! user_systemd_works; then
+    msg \
+      "Предупреждение: пользовательский systemd в этом сеансе не отвечает. Сервис будет создан, но автозапуск может не включиться — проверьте после установки: systemctl --user status bot" \
+      "Warning: user systemd is not responding in this session. The service will be created, but autostart may not enable — check after install: systemctl --user status bot" \
+      "Uwaga: systemd użytkownika nie odpowiada w tej sesji. Usługa zostanie utworzona, ale autostart może się nie włączyć — sprawdź po instalacji: systemctl --user status bot" \
+      "Aviso: el systemd de usuario no responde en esta sesión. El servicio se creará, pero el inicio automático puede no activarse — verifique: systemctl --user status bot"
+  fi
   install_service
   create_daily_timer
-  enable_linger
   
   msg \
     "Установка TTMediaBot успешно завершена!" \

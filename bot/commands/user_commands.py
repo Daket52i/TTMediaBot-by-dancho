@@ -369,6 +369,10 @@ class ServiceCommand(Command):
         services: List[str] = []
         for i in self.service_manager.services:
             service = self.service_manager.services[i]
+            # Скрытые сервисы не показываем вовсе: отключённый YouTube иначе
+            # висел бы в списке строкой «YouTube (Error)».
+            if service.hidden:
+                continue
             if not service.is_enabled:
                 if service.error_message:
                     services.append(

@@ -26,7 +26,8 @@ class YtmService(_Service):
         self.error_message = ""
         self.warning_message = ""
         self.help = ""
-        self.hidden = False
+        # См. комментарий в yt.py: сервис отключён и скрыт из меню.
+        self.hidden = True
         self.yt_config = bot.config.services.yt
         self._warm_lock = threading.Lock()
         self._is_warmed = False

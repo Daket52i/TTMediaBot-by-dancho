@@ -1,5 +1,7 @@
 from __future__ import annotations
 import logging
+import os
+import subprocess
 import time
 import threading
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -139,6 +141,11 @@ class RtService(_Service):
             author = info.get("author", "")
             full_title = f"{title} - {author}" if author else title
 
+            # Поток на bl.rutube.ru отдаётся только с Referer/UA — плеер (mpv)
+            # заберёт их отсюда через extra_info["http_headers"].
+            stream_info = dict(info)
+            stream_info["http_headers"] = self.stream_headers()
+
             elapsed = (time.perf_counter() - start_time) * 1000
             logging.info(f"Rutube Get (Process) finished in {elapsed:.2f}ms for {full_title}")
 
@@ -149,7 +156,7 @@ class RtService(_Service):
                     name=full_title or "Rutube Video",
                     format="mp4",
                     type=TrackType.Default,
-                    extra_info=info,
+                    extra_info=stream_info,
                     extracted_at=time.perf_counter(),
                 )
             ]
@@ -275,20 +282,101 @@ class RtService(_Service):
             logging.debug(f"[RT] Autoplay error: {e}")
         return False
 
+    def stream_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": self._headers["User-Agent"],
+            "Referer": "https://rutube.ru/",
+        }
+
+    def _ffmpeg_headers(self) -> str:
+        return "\r\n".join(f"{k}: {v}" for k, v in self.stream_headers().items())
+
+    def _ffmpeg_command(self, stream_url: str, file_path: str) -> List[List[str]]:
+        """Команды ffmpeg по очереди: сначала копирование без перекодирования,
+        потом перекодирование — на случай, если кодек потока не лезет в контейнер."""
+        ext = os.path.splitext(file_path)[1].lower()
+        head = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-headers", self._ffmpeg_headers(),
+            "-user_agent", self._headers["User-Agent"],
+            "-i", stream_url,
+        ]
+
+        if ext == ".mp3":
+            return [head + ["-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", file_path]]
+        if ext in (".m4a", ".aac"):
+            return [head + ["-vn", "-c:a", "aac", "-b:a", "192k", "-f", "adts", file_path]]
+        if ext in (".ogg", ".opus"):
+            return [head + ["-vn", "-c:a", "libopus", "-b:a", "160k", "-f", "ogg", file_path]]
+        if ext == ".mkv":
+            container = ["-f", "matroska"]
+        elif ext == ".ts":
+            container = ["-f", "mpegts"]
+        else:
+            container = ["-f", "mp4"]
+
+        return [
+            head + ["-c", "copy"] + container + [file_path],
+            head + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "160k"] + container + [file_path],
+        ]
+
+    def _download_stream(self, stream_url: str, file_path: str, info: Dict[str, Any]) -> None:
+        duration = info.get("duration") or 0
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            duration = 0
+        # Длительность потока неизвестна заранее, поэтому даём запас по времени.
+        timeout = max(600, duration + 600)
+
+        last_error = ""
+        for cmd in self._ffmpeg_command(stream_url, file_path):
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                last_error = f"ffmpeg не успел за {timeout} с"
+                self._remove_partial(file_path)
+                continue
+            except FileNotFoundError:
+                raise errors.ServiceError(
+                    "для скачивания видео с Rutube нужен ffmpeg — он не установлен"
+                )
+
+            if proc.returncode == 0 and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                logging.info(
+                    f"Rutube download finished: {os.path.getsize(file_path)} байт, {file_path}"
+                )
+                return
+
+            stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+            last_error = stderr[-300:] or f"ffmpeg вернул код {proc.returncode}"
+            logging.warning(f"Rutube ffmpeg failed (rc={proc.returncode}): {last_error}")
+            self._remove_partial(file_path)
+
+        raise errors.ServiceError(f"Rutube: не удалось скачать видео ({last_error})")
+
+    @staticmethod
+    def _remove_partial(file_path: str) -> None:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
+
     def download(self, track: Track, file_path: str, video: bool = False) -> None:
         info = track.extra_info or {}
         video_id = info.get("videoId") or self._extract_video_id(track.url)
 
         if video_id:
             stream_url = self._resolve_stream_url(video_id)
-            if stream_url:
-                import subprocess
-                cmd = [
-                    "ffmpeg", "-y", "-i", stream_url,
-                    "-c", "copy", file_path,
-                ]
-                subprocess.run(cmd, capture_output=True, timeout=300)
-                return
+            if not stream_url:
+                # Раньше в этом случае молча качалась HTML-страница видео.
+                raise errors.ServiceError(
+                    "Rutube не отдал ссылку на поток для этого видео"
+                )
+            self._download_stream(stream_url, file_path, info)
+            return
 
         downloader = __import__("downloader")
         downloader.download_file(track.url, file_path)

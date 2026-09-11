@@ -28,7 +28,9 @@ class YtService(_Service):
         self.error_message = ""
         self.warning_message = ""
         self.help = ""
-        self.hidden = False
+        # Из РФ YouTube не работает, сервис отключён — из меню его убираем,
+        # чтобы он не висел в списке строкой «YouTube (Error)».
+        self.hidden = True
         self._cookie_lock = threading.Lock()
         self._warm_lock = threading.Lock()
         self._is_warmed = False

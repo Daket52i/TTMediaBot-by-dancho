@@ -30,10 +30,10 @@ RECOVERY_BACKOFFS=(20 40 80 160 300)
 RECOVERY_FAILURES=0
 NEXT_RECOVERY_AT=0
 
+# YouTube из бота убран (в РФ он не работает), общий бридж-сервис больше не
+# поднимается — сторожу нечего восстанавливать, всегда отвечаем «не поддерживается».
 shared_youtube_service_supported() {
-    $SUDO docker image inspect ttmediabot >/dev/null 2>&1 \
-        && $SUDO docker run --rm --entrypoint test ttmediabot \
-            -f /home/ttbot/TTMediaBot/youtube_services.sh
+    return 1
 }
 
 # Cleanup function

@@ -81,12 +81,18 @@ class MfModel(BaseModel):
     search_results: int = 10
 
 
+class HitmoModel(BaseModel):
+    enabled: bool = True
+    search_results: int = 10
+
+
 class ServicesModel(BaseModel):
-    default_service: str = "yt"
+    default_service: str = "mf"
     yt: YtModel = YtModel()
     ytm: YtmModel = YtmModel()
     rt: RtModel = RtModel()
     mf: MfModel = MfModel()
+    hitmo: HitmoModel = HitmoModel()
 
 
 class LoggerModel(BaseModel):

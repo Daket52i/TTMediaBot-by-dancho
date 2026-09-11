@@ -18,19 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        fi \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js LTS (matching install.sh)
-RUN mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Clone and compile the Node.js bgutil provider server
-RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-provider \
-    && cd /opt/bgutil-provider/server \
-    && npm ci \
-    && npx tsc
+# Node.js и bgutil-провайдер здесь больше не ставятся: они были нужны только
+# YouTube-бриджу, а YouTube из бота убран.
 
 # Create user
 RUN useradd -ms /bin/bash ttbot
@@ -49,11 +38,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir "httpx[http2]>=0.28.1"
-
-# Keep the moving YouTube.js main branch in its own Docker cache layer.
-# Rebuilds reuse it; menu option 7 removes the layer and fetches main again.
-COPY youtube_bridge/package.json youtube_bridge/package.json
-RUN npm install --prefix youtube_bridge --omit=dev
 
 # Build argument to bust cache for core code and frequently-changing tools
 ARG CACHEBUST=1

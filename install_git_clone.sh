@@ -11,7 +11,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 
-REPO_URL="https://github.com/JoaoDEVWHADS/TTMediaBot.git"
+REPO_URL="https://github.com/Daket52i/TTMediaBot-by-dancho.git"
 
 # Function to detect package manager and install packages
 install_packages() {
@@ -67,7 +67,9 @@ if [ "$CURRENT_IS_REPO" = false ]; then
         git pull
     else
         echo "--- Cloning Repository ---"
-        git clone "$REPO_URL"
+        # Каталог задаём явно: без этого git берёт имя из URL
+        # (TTMediaBot-by-dancho), а дальше скрипт идёт в TTMediaBot и падает.
+        git clone "$REPO_URL" "$DIR_NAME"
         if [ $? -ne 0 ]; then
             echo "Error cloning repository. Check your internet connection."
             exit 1
@@ -92,70 +94,99 @@ echo "Ownership and permissions set for user: $REAL_USER"
 
 echo "--- Checking TeamTalk_DLL ---"
 
-# ... (down near line 148 and 154) ...
-
-DLL_URL="https://github.com/JoaoDEVWHADS/TTMediaBot/releases/download/downloadttdll/TeamTalk_DLL.zip"
+# DLL качаем с официального сайта bearware (та же версия 5.22a, что и в bot.sh),
+# а не из релизов чужого репозитория: там лежала старая сборка.
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" || "$ARCH" =~ ^arm ]]; then
-    echo "ℹ️ ARM architecture detected ($ARCH). Using ARM DLL..."
-    DLL_URL="https://github.com/JoaoDEVWHADS/TTMediaBot/releases/download/downloadttdll/ttarm.zip"
+    echo "ARM architecture detected ($ARCH). Using ARM SDK..."
+    SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_raspbian_arm64.7z"
 else
-    echo "ℹ️ x86_64/AMD64 architecture detected ($ARCH). Using x86 DLL..."
-    DLL_URL="https://github.com/JoaoDEVWHADS/TTMediaBot/releases/download/downloadttdll/TeamTalk_DLL.zip"
+    echo "x86_64/AMD64 architecture detected ($ARCH). Using x86 SDK..."
+    SDK_URL="https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z"
 fi
-DLL_FILE="TeamTalk_DLL.zip"
+SDK_FILE="ttsdk.7z"
 
-if [ -d "TeamTalk_DLL" ] && [ -f "TeamTalk_DLL/libTeamTalk5.so" ]; then
-    echo "✅ TeamTalk_DLL folder and library already exist. Skipping download and extraction."
+if [ -d "TeamTalk_DLL" ] && [ -f "TeamTalk_DLL/libTeamTalk5.so" ] && [ -d "TeamTalkPy" ]; then
+    echo "TeamTalk_DLL and TeamTalkPy already exist. Skipping download and extraction."
 else
-    if [ -f "$DLL_FILE" ]; then
-        echo "📦 TeamTalk_DLL.zip already exists. Skipping download."
-    else
-        echo "📥 Downloading TeamTalk_DLL..."
-        wget "$DLL_URL" -O "$DLL_FILE"
-        if [ $? -ne 0 ]; then
-            echo "❌ Error downloading TeamTalk_DLL."
-            exit 1
-        fi
-        echo "✅ Download complete!"
+    if ! command -v 7z &> /dev/null; then
+        echo "7z not found. Installing p7zip..."
+        # Имя пакета зависит от дистрибутива: в Debian/Ubuntu — p7zip-full,
+        # в RHEL/Fedora — p7zip.
+        install_packages p7zip-full || install_packages p7zip || true
     fi
-
-    echo "--- Extracting TeamTalk_DLL ---"
-    unzip -o "$DLL_FILE"
-    if [ $? -ne 0 ]; then
-        echo "❌ Error extracting TeamTalk_DLL."
+    if ! command -v 7z &> /dev/null; then
+        echo "ERROR: 7z not found (package p7zip-full). Cannot extract SDK."
         exit 1
     fi
-    echo "✅ Extraction complete!"
 
-    echo "--- Removing TeamTalk_DLL zip ---"
-    rm -f "$DLL_FILE"
-    echo "✅ ZIP file removed."
+    echo "Downloading TeamTalk SDK..."
+    rm -f "$SDK_FILE"
+    wget -q --show-progress "$SDK_URL" -O "$SDK_FILE" || true
+    if [ ! -s "$SDK_FILE" ]; then
+        echo "ERROR: failed to download TeamTalk SDK from $SDK_URL."
+        rm -f "$SDK_FILE"
+        exit 1
+    fi
+    echo "Download complete."
+
+    echo "--- Extracting TeamTalk SDK ---"
+    rm -rf ttsdk
+    mkdir -p ttsdk
+    if ! 7z x "$SDK_FILE" -ottsdk > /tmp/ttbot_7z.log 2>&1; then
+        echo "ERROR: failed to extract the SDK archive. Last log lines:"
+        tail -n 15 /tmp/ttbot_7z.log
+        rm -f "$SDK_FILE"
+        exit 1
+    fi
+    echo "Extraction complete."
+
+    EXTRACTED_DIR=$(find ttsdk -maxdepth 1 -mindepth 1 -type d -name "tt5sdk_*" -print -quit)
+    if [ -z "$EXTRACTED_DIR" ]; then
+        echo "ERROR: no tt5sdk_* directory inside the archive."
+        rm -f "$SDK_FILE"
+        rm -rf ttsdk
+        exit 1
+    fi
+
+    if [ -d "$EXTRACTED_DIR/Library/TeamTalk_DLL" ]; then
+        rm -rf TeamTalk_DLL
+        cp -r "$EXTRACTED_DIR/Library/TeamTalk_DLL" .
+    fi
+    if [ -d "$EXTRACTED_DIR/Library/TeamTalkPy" ]; then
+        rm -rf TeamTalkPy
+        cp -r "$EXTRACTED_DIR/Library/TeamTalkPy" .
+    fi
+    if [ -f "$EXTRACTED_DIR/License.txt" ]; then
+        cp "$EXTRACTED_DIR/License.txt" ./TTSDK_license.txt
+    fi
+
+    rm -f "$SDK_FILE"
+    rm -rf ttsdk
+    echo "SDK zip removed."
 fi
 
-if [ ! -d "TeamTalk_DLL" ]; then
-    echo "❌ ERROR: TeamTalk_DLL folder not found!"
+# Без библиотеки бот уходит в бесконечный рестарт уже после «успешной»
+# установки, поэтому проверяем оба каталога сразу.
+if [ ! -f "TeamTalk_DLL/libTeamTalk5.so" ] || [ ! -f "TeamTalkPy/TeamTalk5.py" ]; then
+    echo "ERROR: TeamTalk_DLL/libTeamTalk5.so or TeamTalkPy/TeamTalk5.py is missing!"
+    echo "Without it the bot cannot connect to a TeamTalk server. Installation stopped."
     exit 1
 fi
-echo "✅ TeamTalk_DLL folder is ready!"
+echo "TeamTalk_DLL folder is ready!"
 
-    
-    echo "--- Setting permissions for TeamTalk_DLL ---"
-    chown -R "$REAL_USER":"$REAL_USER" TeamTalk_DLL || true
-    chmod -R 777 TeamTalk_DLL
-    echo "Permissions set for TeamTalk_DLL folder."
-    
-    echo "--- Final Verification ---"
-    
-    ls -la | grep TeamTalk_DLL
-    
-    echo "Setup Complete! Starting Docker Manager..."
-        sleep 2
+echo "--- Setting permissions for TeamTalk_DLL ---"
+chown -R "$REAL_USER":"$REAL_USER" TeamTalk_DLL TeamTalkPy || true
+chmod -R 777 TeamTalk_DLL TeamTalkPy
+echo "Permissions set for SDK folders."
 
-        if [ -f "./ttbotdocker.sh" ]; then
-            chmod +x ./ttbotdocker.sh
-            exec ./ttbotdocker.sh
-        else
-            echo "ERROR: ttbotdocker.sh not found!"
-            exit 1
-        fi
+echo "Setup Complete! Starting Docker Manager..."
+sleep 2
+
+if [ -f "./ttbotdocker.sh" ]; then
+    chmod +x ./ttbotdocker.sh
+    exec ./ttbotdocker.sh
+else
+    echo "ERROR: ttbotdocker.sh not found!"
+    exit 1
+fi

@@ -46,6 +46,7 @@ from bot.services.yt import YtService
 from bot.services.ytm import YtmService
 from bot.services.rt import RtService
 from bot.services.mf import MfService
+from bot.services.hitmo import HitmoService
 
 
 class ServiceManager:
@@ -56,6 +57,7 @@ class ServiceManager:
             "ytm": YtmService(bot, self.config.ytm),
             "rt": RtService(bot, self.config.rt),
             "mf": MfService(bot, self.config.mf),
+            "hitmo": HitmoService(bot, self.config.hitmo),
         }
         self.service: Service = self.services[self.config.default_service]
         self.fallback_service = app_vars.fallback_service

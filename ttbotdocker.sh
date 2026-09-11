@@ -31,40 +31,10 @@ header() {
 }
 
 # Function: Get Cookies (Path or Paste)
+# YouTube из бота убран — в РФ он не работает, куки для него больше не нужны.
+# Функция оставлена заглушкой, чтобы не менять все вызовы ниже.
 get_cookies() {
-    local tmp_cookies="/tmp/cookies_pasted.txt"
-    rm -f "$tmp_cookies"
-    
-    echo -e "${YELLOW}How do you want to provide cookies?${NC}"
-    echo "1. Path to existing file"
-    echo "2. Paste cookie content"
-    read -p "Option [1-2] (Default 1): " cookie_opt
-    cookie_opt=${cookie_opt:-1}
-    
-    if [ "$cookie_opt" == "2" ]; then
-        echo -e "${YELLOW}--------------------------------------------------${NC}"
-        echo -e "${YELLOW}PASTE YOUR COOKIES BELOW.${NC}"
-        echo -e "${YELLOW}THEN: Press ENTER and then press CTRL+D to save.${NC}"
-        echo -e "${YELLOW}--------------------------------------------------${NC}"
-        cat > "$tmp_cookies"
-        echo ""
-        if [ -s "$tmp_cookies" ]; then
-            # Auto-fix: Convert sequences of spaces/tabs to real TABs for Netscape format
-            # preservation of comments and 7-column structure
-            awk '/^#/ {print; next} NF>=7 { $1=$1; print } NF<7 && NF>0 { print }' OFS='\t' "$tmp_cookies" > "${tmp_cookies}.tmp" && mv "${tmp_cookies}.tmp" "$tmp_cookies"
-            
-            echo -e "${GREEN}SUCCESS: Cookies captured and format normalized!${NC}"
-            sleep 1
-            RET_COOKIES="$tmp_cookies"
-        else
-            echo -e "${RED}ERROR: No content was pasted.${NC}"
-            sleep 1
-            RET_COOKIES=""
-        fi
-    else
-        read -p "Full path to cookies file (Ex: /root/cookies.txt): " c_path
-        RET_COOKIES="$c_path"
-    fi
+    RET_COOKIES=""
 }
 
 
@@ -121,64 +91,22 @@ install_dependencies() {
 install_dependencies
 
 
+# YouTube-бридж больше не поднимается: сервис yt отключён в конфиге,
+# а Node.js в образ теперь не ставится. Заглушки, чтобы не ломать вызовы.
 create_shared_youtube_service() {
-    docker rm -f "$YOUTUBE_SERVICE_NAME" >/dev/null 2>&1 || true
-    docker create \
-        --name "$YOUTUBE_SERVICE_NAME" \
-        -p "127.0.0.1:4417:4417" \
-        --label "role=ttmediabot-infrastructure" \
-        --restart always \
-        -e "TTMEDIABOT_BOTS_ROOT=/bots" \
-        -e "YOUTUBE_BRIDGE_HOST=0.0.0.0" \
-        -v "${BOTS_ROOT}:/bots:ro" \
-        --entrypoint /bin/bash \
-        "$BOT_IMAGE" \
-        /home/ttbot/TTMediaBot/youtube_services.sh >/dev/null
+    return 0
 }
 
 start_shared_youtube_service() {
-    docker start "$YOUTUBE_SERVICE_NAME" >/dev/null
-    echo -n "Waiting for shared YouTube service"
-    for _ in $(seq 1 60); do
-        if curl -fsS "$YOUTUBE_BRIDGE_URL/health" >/dev/null 2>&1; then
-            echo -e " [ ${GREEN}OK${NC} ]"
-            return 0
-        fi
-        if [ "$(docker inspect -f '{{.State.Running}}' "$YOUTUBE_SERVICE_NAME" 2>/dev/null)" != "true" ]; then
-            break
-        fi
-        echo -n "."
-        sleep 0.5
-    done
-    echo -e " [ ${RED}FAILED${NC} ]"
-    docker logs --tail 30 "$YOUTUBE_SERVICE_NAME" 2>&1
-    return 1
+    return 0
 }
 
 shared_youtube_mount_is_current() {
-    local bot_dir bot_name
-
-    for bot_dir in "$BOTS_ROOT"/*; do
-        [ -d "$bot_dir" ] || continue
-        bot_name=$(basename "$bot_dir")
-        docker exec "$YOUTUBE_SERVICE_NAME" test -d "/bots/$bot_name"
-        return
-    done
-
     return 0
 }
 
 ensure_shared_youtube_service() {
-    if ! docker inspect "$YOUTUBE_SERVICE_NAME" >/dev/null 2>&1; then
-        create_shared_youtube_service || return 1
-    fi
-    start_shared_youtube_service || return 1
-
-    if ! shared_youtube_mount_is_current; then
-        echo -e "${YELLOW}Shared YouTube service has a stale bots mount; recreating it...${NC}"
-        create_shared_youtube_service || return 1
-        start_shared_youtube_service
-    fi
+    return 0
 }
 
 # Function: Recreate Bot Containers
@@ -198,23 +126,17 @@ recreate_bot_containers() {
             fi
             
             # Recreate
-            # Ensure cookies.txt exists just in case
-            if [ ! -f "$d/cookies.txt" ]; then touch "$d/cookies.txt"; fi
             if [ -f "$d/config.json" ]; then
-                tmp_config=$(mktemp)
-                jq '.services.yt.cookiefile_path = "data/cookies.txt"' "$d/config.json" > "$tmp_config" && mv "$tmp_config" "$d/config.json"
                 chown 1000:1000 "$d/config.json"
             fi
-            
+
             docker create \
                 --name "${bot_name}" \
                 --network host \
                 -e "TTBOT_INSTANCE=${bot_name}" \
-                -e "YOUTUBE_BRIDGE_URL=${YOUTUBE_BRIDGE_URL}" \
                 --label "role=ttmediabot" \
                 --restart always \
                 -v "${d}:/home/ttbot/TTMediaBot/data" \
-                -v "${d}/cookies.txt:/home/ttbot/TTMediaBot/data/cookies.txt" \
                 "${BOT_IMAGE}" > /dev/null 2>&1
                 
             if [ $? -eq 0 ]; then
@@ -536,25 +458,7 @@ create_bot() {
     
     # Copy default config
     cp "$CONFIG_SOURCE" "$CURRENT_BOT_DIR/config.json"
-    
-    # Configure cookies mount
-    COOKIES_MOUNT=""
-    CONTAINER_COOKIE_PATH=""
-    
-    if [ -f "$cookies_path" ]; then
-        echo "Copying cookies file..."
-        cp "$cookies_path" "$CURRENT_BOT_DIR/cookies.txt"
-        chown 1000:1000 "$CURRENT_BOT_DIR/cookies.txt"
-        COOKIES_MOUNT="-v ${CURRENT_BOT_DIR}/cookies.txt:/home/ttbot/TTMediaBot/data/cookies.txt"
-        CONTAINER_COOKIE_PATH="data/cookies.txt"
-    else
-        echo -e "${RED}Cookies file not found! The bot will be created without specific cookies.${NC}"
-        # Create empty cookies file to avoid mount errors if referenced
-        touch "$CURRENT_BOT_DIR/cookies.txt"
-        COOKIES_MOUNT="-v ${CURRENT_BOT_DIR}/cookies.txt:/home/ttbot/TTMediaBot/data/cookies.txt"
-        CONTAINER_COOKIE_PATH="data/cookies.txt"
-    fi
-    
+
     # Update JSON with jq
     tmp_config=$(mktemp)
     jq --arg host "$server_addr" \
@@ -566,7 +470,6 @@ create_bot() {
        --arg pass "$password" \
        --arg chan "$channel" \
        --arg chan_pass "$channel_password" \
-       --arg cookie "$CONTAINER_COOKIE_PATH" \
        --argjson del_timer "$delete_timer" \
        '.teamtalk.hostname = $host |
         .teamtalk.tcp_port = $tcp |
@@ -577,8 +480,7 @@ create_bot() {
         .teamtalk.password = $pass |
         .teamtalk.channel = $chan |
         .teamtalk.channel_password = $chan_pass |
-        .general.delete_uploaded_files_after = $del_timer |
-        if $cookie != "" then .services.yt.cookiefile_path = $cookie else . end' \
+        .general.delete_uploaded_files_after = $del_timer' \
        "$CURRENT_BOT_DIR/config.json" > "$tmp_config" && mv "$tmp_config" "$CURRENT_BOT_DIR/config.json"
 
     # Fix permissions for container user (uid 1000 is standard for non-root in many images)
@@ -591,11 +493,9 @@ create_bot() {
         --name "${current_bot_name}" \
         --network host \
         -e "TTBOT_INSTANCE=${current_bot_name}" \
-        -e "YOUTUBE_BRIDGE_URL=${YOUTUBE_BRIDGE_URL}" \
         --label "role=ttmediabot" \
         --restart always \
         -v "${CURRENT_BOT_DIR}:/home/ttbot/TTMediaBot/data" \
-        $COOKIES_MOUNT \
         "${BOT_IMAGE}" > /dev/null 2>&1
 
 
@@ -1362,27 +1262,17 @@ duplicate_bot() {
             tmp_config=$(mktemp)
             jq --arg nick "$current_nickname" '.teamtalk.nickname = $nick' "$CURRENT_BOT_DIR/config.json" > "$tmp_config" && mv "$tmp_config" "$CURRENT_BOT_DIR/config.json"
             
-            # Copy cookies if exists
-            if [ -f "$SOURCE_BOT_DIR/cookies.txt" ]; then
-                cp "$SOURCE_BOT_DIR/cookies.txt" "$CURRENT_BOT_DIR/cookies.txt"
-            else
-                touch "$CURRENT_BOT_DIR/cookies.txt"
-            fi
-            
             # Fix permissions
             chown -R 1000:1000 "$CURRENT_BOT_DIR"
-            
+
             # Create container (without starting)
-            COOKIES_MOUNT_DUP="-v ${CURRENT_BOT_DIR}/cookies.txt:/home/ttbot/TTMediaBot/data/cookies.txt"
             docker create \
                 --name "${current_bot_name}" \
                 --network host \
                 -e "TTBOT_INSTANCE=${current_bot_name}" \
-                -e "YOUTUBE_BRIDGE_URL=${YOUTUBE_BRIDGE_URL}" \
                 --label "role=ttmediabot" \
                 --restart always \
                 -v "${CURRENT_BOT_DIR}:/home/ttbot/TTMediaBot/data" \
-                -v "${CURRENT_BOT_DIR}/cookies.txt:/home/ttbot/TTMediaBot/data/cookies.txt" \
                 "${BOT_IMAGE}" > /dev/null 2>&1
             
             if [ $? -eq 0 ]; then
@@ -1402,63 +1292,6 @@ duplicate_bot() {
         read -p "Press Enter to continue..."
         header
     done
-}
-
-# Function: Update Cookies for All Bots
-update_all_cookies() {
-    header
-    echo -e "${YELLOW} --- Update Cookies for All Bots --- ${NC}"
-    list_bots
-    
-    get_cookies
-    new_cookies_path="$RET_COOKIES"
-    
-    if [ ! -f "$new_cookies_path" ]; then
-        echo -e "${RED}File not found!${NC}"
-        read -p "Enter to return..."
-        return
-    fi
-    
-    echo "Updating cookies in all bots..."
-    
-    # Loop verify dirs
-    found_any=false
-    for bot_dir in "$BOTS_ROOT"/*; do
-        if [ -d "$bot_dir" ]; then
-            found_any=true
-            bot_name=$(basename "$bot_dir")
-            echo "Updating bot: $bot_name"
-            
-            cp "$new_cookies_path" "$bot_dir/cookies.txt"
-            tmp_config=$(mktemp)
-            jq '.services.yt.cookiefile_path = "data/cookies.txt"' "$bot_dir/config.json" > "$tmp_config" && mv "$tmp_config" "$bot_dir/config.json"
-            chown 1000:1000 "$bot_dir/config.json"
-            
-            # Ensure permissions
-            chown 1000:1000 "$bot_dir/cookies.txt"
-            
-            echo -e "${GREEN}OK.${NC}"
-        fi
-    done
-    
-    if [ "$found_any" = false ]; then
-        echo "No bots found."
-    else
-        echo -e "${YELLOW}Restarting all bots to apply new cookies...${NC}"
-        
-        # Stop all bots in parallel (fast)
-        echo "Stopping bots..."
-        docker stop -t 1 $(docker ps -a -q -f "label=role=ttmediabot") 2>/dev/null
-        
-        # Start all bots in parallel (fast)
-        echo "Starting bots..."
-        docker start $(docker ps -a -q -f "label=role=ttmediabot") 2>/dev/null
-        
-        echo -e "${GREEN}All bots restarted.${NC}"
-    fi
-    
-    rm -f /tmp/cookies_pasted.txt
-    read -p "Completed. Enter to return..."
 }
 
 # Function: Restart All with Timer
@@ -1636,26 +1469,15 @@ restore_bots() {
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Extraction completed!${NC}"
-        echo -e "${YELLOW}Refreshing the shared YouTube service mount...${NC}"
-        create_shared_youtube_service || {
-            echo -e "${RED}Could not recreate the shared YouTube service.${NC}"
-            read -p "Press Enter to continue..."
-            return
-        }
         echo -e "${YELLOW}Recreating bot containers from restored configs...${NC}"
-        
+
         # We need to recreate containers
         recreate_bot_containers
-        
+
         # Start them
         echo -e "${YELLOW}Starting restored bots...${NC}"
         docker start $(docker ps -a -q -f "label=role=ttmediabot") >/dev/null 2>&1
-        start_shared_youtube_service || {
-            echo -e "${RED}Bots were restored, but the shared YouTube service failed to start.${NC}"
-            read -p "Press Enter to continue..."
-            return
-        }
-        
+
         echo -e "${GREEN}Restore completed and bots started!${NC}"
     else
         echo -e "${RED}Error during extraction!${NC}"
@@ -1731,30 +1553,6 @@ clear_bot_caches() {
     read -p "Press Enter to continue..."
 }
 
-# Function: Clear YouTube Bridge Cache
-clear_youtube_bridge_cache() {
-    header
-    echo -e "${YELLOW} --- Clear YouTube Bridge Cache --- ${NC}"
-    echo "This will clear in-memory and on-disk search & stream caches."
-    echo ""
-    read -p "Are you sure you want to clear YouTube Bridge cache? (y/N): " confirm
-    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
-        return
-    fi
-
-    echo ""
-    echo "Clearing YouTube Bridge persistent cache..."
-    rm -f "${SCRIPT_DIR}/youtube_bridge/bridge_cache.json" 2>/dev/null || true
-    
-    if docker inspect "$YOUTUBE_SERVICE_NAME" >/dev/null 2>&1; then
-        docker exec "$YOUTUBE_SERVICE_NAME" rm -f /home/ttbot/TTMediaBot/youtube_bridge/bridge_cache.json 2>/dev/null || true
-        echo "Restarting YouTube Bridge service to flush RAM..."
-        docker restart "$YOUTUBE_SERVICE_NAME" >/dev/null 2>&1 || true
-    fi
-
-    echo -e "${GREEN}YouTube Bridge cache cleared successfully!${NC}"
-    read -p "Press Enter to continue..."
-}
 
 # Function: Manage Bots
 manage_bots() {
@@ -1768,14 +1566,12 @@ manage_bots() {
         echo "4. Delete Bot"
         echo "5. Bulk Delete Bots"
         echo "6. Duplicate Bot"
-        echo "7. Update Cookies (All Bots)"
-        echo "8. Restart with Timer (Stop -> Wait -> Start)"
-        echo "9. Bulk Update Configuration"
-        echo "10. Backup / Restore Bots"
-        echo "11. Clear All Bot Logs"
-        echo "12. Clear All Bot Cache Files"
-        echo "13. Clear YouTube Bridge Cache"
-        echo "14. Return to Main Menu"
+        echo "7. Restart with Timer (Stop -> Wait -> Start)"
+        echo "8. Bulk Update Configuration"
+        echo "9. Backup / Restore Bots"
+        echo "10. Clear All Bot Logs"
+        echo "11. Clear All Bot Cache Files"
+        echo "12. Return to Main Menu"
         echo ""
         read -p "Choose an option: " opt_manage
         
@@ -1820,34 +1616,26 @@ manage_bots() {
                 header
                 ;;
             7)
-                update_all_cookies
-                header
-                ;;
-            8)
                 restart_with_timer
                 header
                 ;;
-            9)
+            8)
                 bulk_update_config
                 header
                 ;;
-            10)
+            9)
                 backup_restore_menu
                 header
                 ;;
-            11)
+            10)
                 clear_bot_logs
                 header
                 ;;
-            12)
+            11)
                 clear_bot_caches
                 header
                 ;;
-            13)
-                clear_youtube_bridge_cache
-                header
-                ;;
-            14)
+            12)
                 return
                 ;;
             *)
@@ -1865,11 +1653,6 @@ if [ -f "$SCRIPT_DIR/update.sh" ]; then
 fi
 
 build_image
-if docker run --rm --entrypoint test "$BOT_IMAGE" -f /home/ttbot/TTMediaBot/youtube_services.sh; then
-    ensure_shared_youtube_service || exit 1
-else
-    echo -e "${YELLOW}Shared YouTube service requires an image rebuild (option 3).${NC}"
-fi
 
 # Main Menu
 mkdir -p "$BOTS_ROOT"
@@ -1884,8 +1667,7 @@ while true; do
     echo "5. Check for Updates"
     echo "6. Enable/Disable Auto-Updates"
     echo "7. Clean Docker Cache (Unused)"
-    echo "8. Manage Shared YouTube Servers"
-    echo "9. Exit"
+    echo "8. Exit"
     echo ""
     read -p "Choose an option: " option
     
@@ -1934,15 +1716,6 @@ while true; do
             header
             ;;
         8)
-            if [ -f "$SCRIPT_DIR/youtube_server_manager.sh" ]; then
-                bash "$SCRIPT_DIR/youtube_server_manager.sh"
-            else
-                echo -e "${RED}youtube_server_manager.sh not found.${NC}"
-                read -p "Press Enter to continue..."
-            fi
-            header
-            ;;
-        9)
             echo "Exiting..."
             exit 0
             ;;

@@ -24,6 +24,10 @@ class Streamer:
             fetched_data = [track]
             for service in self.service_manager.services.values():
                 try:
+                    # Отключённый сервис не должен перехватывать ссылку: иначе
+                    # youtube-ссылка уходила бы в выключенный yt и падала.
+                    if not service.is_enabled:
+                        continue
                     if (
                         parsed_url.hostname in service.hostnames
                         or service.name == self.service_manager.fallback_service

@@ -16,7 +16,9 @@ Repository: https://github.com/JoaoDEVWHADS/TTMediaBot
 Original Authors: Amir Gumerov, Vladislav Kopylov, Beqa Gozalishvili, Kirill Belousov.
 """
 )
-fallback_service = "yt"
+# Запасной сервис, если основной не поднялся. YouTube (yt/ytm) в боте
+# отключён — из РФ он не работает, поэтому запасной путь ведёт на Rutube.
+fallback_service = "rt"
 loop_timeout = 0.01
 max_message_length = 256
 recents_max_lenth = 32

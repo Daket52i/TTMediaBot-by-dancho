@@ -74,56 +74,22 @@ header() {
     echo ""
 }
 
+# YouTube-бридж больше не поднимается: сервис yt отключён в конфиге,
+# Node.js в образ не ставится. Заглушки, чтобы не ломать вызовы ниже.
 create_shared_youtube_service() {
-    docker rm -f "$YOUTUBE_SERVICE_NAME" >/dev/null 2>&1 || true
-    docker create \
-        --name "$YOUTUBE_SERVICE_NAME" \
-        -p "127.0.0.1:4417:4417" \
-        --label "role=ttmediabot-infrastructure" \
-        --restart always \
-        -e "TTMEDIABOT_BOTS_ROOT=/bots" \
-        -e "YOUTUBE_BRIDGE_HOST=0.0.0.0" \
-        -v "${BOTS_ROOT}:/bots:ro" \
-        --entrypoint /bin/bash \
-        "$BOT_IMAGE" \
-        /home/ttbot/TTMediaBot/youtube_services.sh >/dev/null
+    return 0
 }
 
 start_shared_youtube_service() {
-    docker start "$YOUTUBE_SERVICE_NAME" >/dev/null
-    echo -n "Waiting for shared YouTube service"
-    for _ in $(seq 1 60); do
-        if curl -fsS "$YOUTUBE_BRIDGE_URL/health" >/dev/null 2>&1; then
-            echo -e " [ ${GREEN}OK${NC} ]"
-            return 0
-        fi
-        if [ "$(docker inspect -f '{{.State.Running}}' "$YOUTUBE_SERVICE_NAME" 2>/dev/null)" != "true" ]; then
-            break
-        fi
-        echo -n "."
-        sleep 0.5
-    done
-    echo -e " [ ${RED}FAILED${NC} ]"
-    docker logs --tail 30 "$YOUTUBE_SERVICE_NAME" 2>&1
-    return 1
+    return 0
 }
 
 shared_youtube_service_supported() {
-    docker image inspect "$BOT_IMAGE" >/dev/null 2>&1 \
-        && docker run --rm --entrypoint test "$BOT_IMAGE" \
-            -f /home/ttbot/TTMediaBot/youtube_services.sh
+    return 1
 }
 
 reconcile_shared_youtube_service() {
-    if ! shared_youtube_service_supported; then
-        return 0
-    fi
-    if curl -fsS "$YOUTUBE_BRIDGE_URL/health" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    echo -e "${YELLOW}Shared YouTube service is unavailable. Recreating it...${NC}"
-    create_shared_youtube_service && start_shared_youtube_service
+    return 0
 }
 
 # Function: Recreate Bot Containers
@@ -143,23 +109,17 @@ recreate_bot_containers() {
             fi
             
             # Recreate
-            # Ensure cookies.txt exists just in case
-            if [ ! -f "$d/cookies.txt" ]; then touch "$d/cookies.txt"; fi
             if [ -f "$d/config.json" ]; then
-                tmp_config=$(mktemp)
-                jq '.services.yt.cookiefile_path = "data/cookies.txt"' "$d/config.json" > "$tmp_config" && mv "$tmp_config" "$d/config.json"
                 chown 1000:1000 "$d/config.json"
             fi
-            
+
             docker create \
                 --name "${bot_name}" \
                 --network host \
                 -e "TTBOT_INSTANCE=${bot_name}" \
-                -e "YOUTUBE_BRIDGE_URL=${YOUTUBE_BRIDGE_URL}" \
                 --label "role=ttmediabot" \
                 --restart always \
                 -v "${d}:/home/ttbot/TTMediaBot/data" \
-                -v "${d}/cookies.txt:/home/ttbot/TTMediaBot/data/cookies.txt" \
                 "${BOT_IMAGE}" > /dev/null 2>&1
                 
             if [ $? -eq 0 ]; then
@@ -213,10 +173,8 @@ perform_image_rebuild() {
          fi
          
          # Recreate containers to use new image
-         create_shared_youtube_service || exit 1
          recreate_bot_containers
-         start_shared_youtube_service || exit 1
-         
+
          if [ ! -z "$RUNNING_NAMES" ]; then
              echo "$RUNNING_NAMES" | while read -r name; do
                  if [ -n "$name" ] && [ -d "$BOTS_ROOT/$name" ]; then
