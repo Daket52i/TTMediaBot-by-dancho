@@ -64,9 +64,10 @@ RUN chown -R ttbot:ttbot /home/ttbot/TTMediaBot \
 USER ttbot
 
 # Run additional tools (as per original Dockerfile and README context)
-# Run additional tools (as per original Dockerfile and README context)
-# Run additional tools (as per original Dockerfile and README context)
-RUN python tools/compile_locales.py
+# TeamTalk SDK в репозиторий не входит (.gitignore), поэтому образ без
+# ttsdk_downloader.py собирался без libTeamTalk5.so — контейнер не мог
+# подключиться к серверу. Как в апстриме: сначала SDK, потом локали.
+RUN python tools/ttsdk_downloader.py && python tools/compile_locales.py
 
 # Command to run the bot via entrypoint
 ENTRYPOINT ["./entrypoint.sh"]

@@ -35,6 +35,9 @@ def get_url_suffix_from_platform() -> str:
     else:
         if machine == "AMD64" or machine == "x86_64":
             return "ubuntu22_x86_64"
+        elif machine in ("aarch64", "arm64"):
+            # Раньше на arm64 отдавался armhf-архив — библиотека не грузилась.
+            return "raspbian_arm64"
         elif "arm" in machine:
             return "raspbian_armhf"
         else:
@@ -45,9 +48,10 @@ def download() -> None:
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
     r = requests.get(url, headers=headers)
     page = bs4.BeautifulSoup(r.text, features="html.parser")
-    # The last tested version series is v5.15x
+    # Установщики (install.sh, install_git_clone.sh, bot.sh) берут SDK 5.22a,
+    # держим ту же серию и здесь, иначе docker-образ собирается со старым SDK.
     versions = page.find_all("li")
-    version = [i for i in versions if "5.15" in i.text][-1].a.get("href")[0:-1]
+    version = [i for i in versions if "5.22" in i.text][-1].a.get("href")[0:-1]
     download_url = (
         url
         + "/"

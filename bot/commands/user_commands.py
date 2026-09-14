@@ -613,6 +613,16 @@ class DownloadCommand(Command):
         )
 
     def __call__(self, arg: str, user: User) -> Optional[str]:
+        # Проверка права из апстрима: без UploadFiles сервер отвергнет файл,
+        # и пользователь получил бы сырой ответ сервера вместо внятной причины.
+        # В апстриме стояло self.ttclient.user.user_account — такого поля у
+        # TTClient нет, и проверка падала с AttributeError. Здесь берём
+        # собственную учётку бота, а если она ещё не заполнена — не мешаем.
+        rights = getattr(getattr(self.ttclient, "user_account", None), "rights", None)
+        if rights is not None and not (rights & UserRight.UploadFiles == UserRight.UploadFiles):
+            raise errors.AccessDeniedError(
+                self.translator.translate("Cannot upload file to channel")
+            )
         if self.player.state != State.Stopped:
             track = self.player.track
             if track.url and (

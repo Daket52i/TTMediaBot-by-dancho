@@ -13,6 +13,8 @@ from bot.sound_devices import SoundDevice, SoundDeviceType
 if sys.platform == "win32":
     if sys.version_info.major == 3 and sys.version_info.minor >= 8:
         os.add_dll_directory(app_vars.directory)
+        # В новом SDK TeamTalk5.dll лежит в TeamTalk_DLL — как в апстриме.
+        os.add_dll_directory(os.path.join(app_vars.directory, "TeamTalk_DLL"))
     else:
         os.chdir(app_vars.directory)
 
@@ -369,8 +371,19 @@ class TeamTalk:
             message = self.get_message(obj.textmessage)
         except (UnicodeDecodeError, ValueError):
             message = Message("", user, channel, MessageType.NONE)
+        # Незнакомое событие не должно убивать поток TeamTalk: get_event()
+        # зовётся в thread.py вне try/except, и ValueError из EventType(...)
+        # тихо останавливал весь цикл приёма событий — бот переставал видеть
+        # сообщения и дисконнекты. Неизвестное событие просто пропускаем.
+        try:
+            event_type = EventType(obj.nClientEvent)
+        except ValueError:
+            logging.warning(
+                f"Неизвестное событие TeamTalk {obj.nClientEvent} — пропускаю"
+            )
+            event_type = EventType.NONE
         return Event(
-            EventType(obj.nClientEvent),
+            event_type,
             obj.nSource,
             channel,
             error,

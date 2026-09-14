@@ -278,6 +278,15 @@ class EventType(Enum):
     FILE_REMOVE = TeamTalkPy.ClientEvent.CLIENTEVENT_CMD_FILE_REMOVE
     USER_ACCOUNT = TeamTalkPy.ClientEvent.CLIENTEVENT_CMD_USERACCOUNT
     BANNED_USER = TeamTalkPy.ClientEvent.CLIENTEVENT_CMD_BANNEDUSER
+    # События создания/удаления учётной записи появились в SDK 5.15A. Берём их
+    # у библиотеки, если она их знает: в старом вендоренном враппере (и в
+    # typestubs) этих констант нет, а падать из-за них бот не должен.
+    USERACCOUNT_NEW = getattr(
+        TeamTalkPy.ClientEvent, "CLIENTEVENT_CMD_USERACCOUNT_NEW", -1
+    )
+    USERACCOUNT_REMOVE = getattr(
+        TeamTalkPy.ClientEvent, "CLIENTEVENT_CMD_USERACCOUNT_REMOVE", -2
+    )
     STATE_CHANGE = TeamTalkPy.ClientEvent.CLIENTEVENT_USER_STATECHANGE
     USER_VIDEO_CAPTURE = TeamTalkPy.ClientEvent.CLIENTEVENT_USER_VIDEOCAPTURE
     USER_MEDIAFILE_VIDEO = TeamTalkPy.ClientEvent.CLIENTEVENT_USER_MEDIAFILE_VIDEO
